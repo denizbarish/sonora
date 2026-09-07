@@ -69,9 +69,13 @@ public final class EqualizerChain: @unchecked Sendable {
     }
 
     /// Replaces the band definitions and recomputes coefficients.
-    /// Interface thread only: this calls into the coefficient math.
     ///
-    /// Filter state is left alone, so a slider move does not click.
+    /// Setup path only. See the threading contract on the type: call this before
+    /// the render callback starts, or while it is stopped, never while audio is
+    /// flowing. Live changes go through `applyCoefficients` instead.
+    ///
+    /// Filter state is left alone, which is what lets the chain be reconfigured
+    /// and restarted without a discontinuity.
     public func update(bands newBands: [EqualizerBand]) {
         let clamped = Array(newBands.prefix(Self.maximumBandCount))
         bands = clamped
@@ -102,6 +106,11 @@ public final class EqualizerChain: @unchecked Sendable {
     public func applyCoefficients(_ source: UnsafePointer<BiquadCoefficients>, count: Int) {
         // A negative count would make `0..<usable` trap, and trapping on the
         // audio thread kills the render callback outright.
+        //
+        // Every channel below shares this one bound, which is also what makes a
+        // wrong bound detectable: the last channel's pass would run off the end
+        // of the whole allocation and trip the debug bounds check. Give each
+        // channel its own bound and that safety net disappears.
         let usable = min(max(count, 0), Self.maximumBandCount)
         bandCount = usable
 
