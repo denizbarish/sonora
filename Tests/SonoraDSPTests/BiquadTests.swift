@@ -77,18 +77,46 @@ struct BiquadTests {
         #expect(maximum < 5)
     }
 
-    @Test("reset clears the filter state")
+    @Test("reset clears both state variables")
     func reset() {
         let coefficients = BiquadCoefficients(
             kind: .peaking, frequency: 1_000, q: 1, gainDecibels: 12, sampleRate: sampleRate
         )
+        var reference = Biquad(coefficients: coefficients)
         var filter = Biquad(coefficients: coefficients)
 
         for _ in 0..<100 { _ = filter.process(1) }
         filter.reset()
 
-        // With cleared state the first sample only sees the b0 term.
+        // With cleared state the first sample only sees the b0 term. The
+        // reference filter consumes the same sample so the two stay in step.
         #expect(abs(filter.process(1) - coefficients.b0) < 0.000_01)
+        #expect(abs(reference.process(1) - coefficients.b0) < 0.000_01)
+
+        // state2 does not reach the output until the second sample, so a reset
+        // that cleared only state1 would still pass the assertion above. Running
+        // the reset filter alongside a fresh one catches it: from here on the
+        // two must agree sample for sample.
+        for _ in 0..<8 {
+            #expect(abs(filter.process(1) - reference.process(1)) < 0.000_01)
+        }
+    }
+
+    @Test("state is flushed instead of decaying into subnormals")
+    func denormalFlush() {
+        let coefficients = BiquadCoefficients(
+            kind: .peaking, frequency: 100, q: 4, gainDecibels: 12, sampleRate: sampleRate
+        )
+        var filter = Biquad(coefficients: coefficients)
+
+        for _ in 0..<1_000 { _ = filter.process(1) }
+
+        var output: Float = 0
+        for _ in 0..<200_000 { output = filter.process(0) }
+
+        // Without flushing, the ringing tail decays through the subnormal range
+        // and never reaches exactly zero.
+        #expect(output == 0)
     }
 
     @Test("an impulse produces a decaying finite response")
