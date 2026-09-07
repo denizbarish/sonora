@@ -2273,13 +2273,24 @@ public final class SettingsStore {
     /// this is where those claims are dropped.
     private func reconciled(_ settings: Settings) -> Settings {
         let builtInIdentifiers = Set(BuiltInPresets.all.map(\.id))
+
+        // Each entry's fate is decided once, on its own. Deriving the dropped
+        // list afterwards by asking "did anything with this id survive" loses a
+        // dropped entry whenever it shares an id with a kept one, which is
+        // exactly the duplicated-identifier file this step exists to clean up.
+        var kept: [Preset] = []
+        var dropped: [Preset] = []
+        for preset in settings.userPresets {
+            if !preset.isBuiltIn && !builtInIdentifiers.contains(preset.id) {
+                kept.append(preset)
+            } else {
+                dropped.append(preset)
+            }
+        }
+
         var result = settings
-        result.userPresets = settings.userPresets.filter {
-            !$0.isBuiltIn && !builtInIdentifiers.contains($0.id)
-        }
-        lastDroppedPresets = settings.userPresets.filter { candidate in
-            !result.userPresets.contains { $0.id == candidate.id }
-        }
+        result.userPresets = kept
+        lastDroppedPresets = dropped
         return result
     }
 

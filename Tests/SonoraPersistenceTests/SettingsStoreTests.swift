@@ -183,6 +183,28 @@ struct SettingsStoreTests {
         #expect(store.lastDroppedPresets.map(\.id) == ["forged"])
     }
 
+    @Test("a dropped preset sharing an id with a survivor is still reported")
+    func reportsDroppedPresetSharingAnIdentifier() throws {
+        let store = SettingsStore(directory: try makeTemporaryDirectory())
+
+        var settings = Settings.defaults
+        settings.userPresets = [
+            Preset(
+                id: "shared", name: "Genuine", preampDecibels: 0,
+                gains: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0], isBuiltIn: false
+            ),
+            Preset(
+                id: "shared", name: "Forged", preampDecibels: 0,
+                gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], isBuiltIn: true
+            ),
+        ]
+        try store.save(settings)
+
+        let loaded = store.load()
+        #expect(loaded.userPresets.map(\.name) == ["Genuine"])
+        #expect(store.lastDroppedPresets.map(\.name) == ["Forged"])
+    }
+
     @Test("a clean load reports nothing dropped")
     func cleanLoadDropsNothing() throws {
         let store = SettingsStore(directory: try makeTemporaryDirectory())
