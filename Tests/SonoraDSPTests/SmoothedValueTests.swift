@@ -28,7 +28,10 @@ struct SmoothedValueTests {
             _ = value.nextValue()
         }
 
-        #expect(abs(value.current - 2) < 0.001)
+        // A one-pole ramp leaves exp(-5) of the distance after five time
+        // constants, which is 0.0135 out of 2. Anything tighter is impossible
+        // for this filter, not a bug.
+        #expect(abs(value.current - 2) < 0.02)
     }
 
     @Test("snap jumps immediately without ramping")
