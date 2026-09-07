@@ -727,10 +727,21 @@ public struct Biquad: Sendable {
         let next1 = coefficients.b1 * input - coefficients.a1 * output + state2
         let next2 = coefficients.b2 * input - coefficients.a2 * output
 
-        // Both or neither. See the note on `denormalFloor`: flushing one state
-        // variable alone leaves the section ringing forever at a level it can
-        // never decay past.
-        if abs(next1) < Self.denormalFloor, abs(next2) < Self.denormalFloor {
+        // Non-finite state is flushed first, and for a different reason than
+        // denormals. Every comparison with NaN is false, so the floor test
+        // below can never catch it, and a NaN in the state feeds itself: from
+        // then on every sample comes out NaN however clean the input is. The
+        // limiter downstream turns that into silence, so one glitchy sample
+        // would mute the channel until the app restarts. Flushing lets the
+        // section heal on the very next sample instead.
+        //
+        // Then the denormal case, both or neither. See the note on
+        // `denormalFloor`: flushing one state variable alone leaves the section
+        // ringing forever at a level it can never decay past.
+        if !next1.isFinite || !next2.isFinite {
+            state1 = 0
+            state2 = 0
+        } else if abs(next1) < Self.denormalFloor, abs(next2) < Self.denormalFloor {
             state1 = 0
             state2 = 0
         } else {
@@ -2191,6 +2202,16 @@ public final class SettingsStore {
     public let fileURL: URL
     public private(set) var lastLoadFailure: LoadFailure?
 
+    /// User presets the last load dropped because they claimed to be built in
+    /// or reused a built-in identifier.
+    ///
+    /// Empty after a clean load. Kept separate from `lastLoadFailure` because
+    /// the load itself succeeded: something was cleaned up, nothing was lost to
+    /// an error. Without this the correction is invisible, and a preset that
+    /// some future bug mislabels would simply disappear on the next launch with
+    /// nothing to debug from.
+    public private(set) var lastDroppedPresets: [Preset] = []
+
     private let directory: URL
     private let fileManager = FileManager.default
 
@@ -2206,6 +2227,8 @@ public final class SettingsStore {
     }
 
     public func load() -> Settings {
+        lastDroppedPresets = []
+
         guard fileManager.fileExists(atPath: fileURL.path) else {
             lastLoadFailure = .missing
             return .defaults
@@ -2253,6 +2276,9 @@ public final class SettingsStore {
         var result = settings
         result.userPresets = settings.userPresets.filter {
             !$0.isBuiltIn && !builtInIdentifiers.contains($0.id)
+        }
+        lastDroppedPresets = settings.userPresets.filter { candidate in
+            !result.userPresets.contains { $0.id == candidate.id }
         }
         return result
     }
@@ -2341,12 +2367,14 @@ concurrency:
 jobs:
   test:
     name: Swift package tests
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned to the version the project is developed against. macos-15 was
+      # tried first and carries Swift 6.1, which cannot read this manifest.
       - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_26.app
+        run: sudo xcode-select -switch /Applications/Xcode_26.3.app
 
       - name: Show toolchain
         run: swift --version
@@ -2381,7 +2409,10 @@ git push
 - [ ] **Step 4: Confirm the run passes**
 
 Run: `gh run watch --exit-status`
-Expected: the `Swift package tests` job finishes green. If the runner has no Xcode 26, change the `Select Xcode` step to the newest version the runner image offers (`ls /Applications | grep Xcode`) and push the fix.
+Expected: every job finishes green, including the AddressSanitizer one. If the
+runner image no longer carries Xcode 26.3, pick the newest 26.x it does offer
+(`ls /Applications | grep Xcode`) and push the fix. Never lower
+`swift-tools-version` to make the build pass.
 
 ---
 
