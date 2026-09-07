@@ -53,10 +53,21 @@ public struct Biquad: Sendable {
         let next1 = coefficients.b1 * input - coefficients.a1 * output + state2
         let next2 = coefficients.b2 * input - coefficients.a2 * output
 
-        // Both or neither. See the note on `denormalFloor`: flushing one state
-        // variable alone leaves the section ringing forever at a level it can
-        // never decay past.
-        if abs(next1) < Self.denormalFloor, abs(next2) < Self.denormalFloor {
+        // Non-finite state is flushed first, and for a different reason than
+        // denormals. Every comparison with NaN is false, so the floor test
+        // below can never catch it, and a NaN in the state feeds itself: from
+        // then on every sample comes out NaN however clean the input is. The
+        // limiter downstream turns that into silence, so one glitchy sample
+        // would mute the channel until the app restarts. Flushing lets the
+        // section heal on the very next sample instead.
+        //
+        // Then the denormal case, both or neither. See the note on
+        // `denormalFloor`: flushing one state variable alone leaves the section
+        // ringing forever at a level it can never decay past.
+        if !next1.isFinite || !next2.isFinite {
+            state1 = 0
+            state2 = 0
+        } else if abs(next1) < Self.denormalFloor, abs(next2) < Self.denormalFloor {
             state1 = 0
             state2 = 0
         } else {

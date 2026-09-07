@@ -177,4 +177,25 @@ struct DSPChainTests {
 
         #expect(buffer.allSatisfy { $0.isFinite })
     }
+
+    @Test("the chain recovers after a NaN buffer")
+    func recoversFromNaNBuffer() {
+        let chain = DSPChain(sampleRate: sampleRate, channelCount: 2)
+
+        var poisoned = [Float](repeating: .nan, count: 512)
+        poisoned.withUnsafeMutableBufferPointer { pointer in
+            chain.process(pointer.baseAddress!, frameCount: 256)
+        }
+
+        // The previous test only proved a NaN buffer comes out finite. This one
+        // proves the glitch did not leave the filters poisoned: real audio has
+        // to come through afterwards, not silence.
+        var clean = sineBuffer(frequency: 1_000, frameCount: 256, amplitude: 0.5)
+        clean.withUnsafeMutableBufferPointer { pointer in
+            chain.process(pointer.baseAddress!, frameCount: 256)
+        }
+
+        #expect(clean.allSatisfy { $0.isFinite })
+        #expect(clean.contains { abs($0) > 0.1 })
+    }
 }

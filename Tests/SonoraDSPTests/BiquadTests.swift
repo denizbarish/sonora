@@ -132,4 +132,20 @@ struct BiquadTests {
         #expect(response.allSatisfy { $0.isFinite })
         #expect(abs(response[999]) < abs(response[0]))
     }
+
+    @Test("a NaN burst does not silence the filter forever")
+    func recoversFromNaN() {
+        let coefficients = BiquadCoefficients(
+            kind: .peaking, frequency: 1_000, q: 1.41, gainDecibels: 6, sampleRate: sampleRate
+        )
+        var filter = Biquad(coefficients: coefficients)
+
+        for _ in 0..<16 { _ = filter.process(.nan) }
+
+        // Without flushing non-finite state the NaN feeds itself and every
+        // later sample is NaN, however clean the input.
+        let recovered = filter.process(0.5)
+        #expect(recovered.isFinite)
+        #expect(recovered != 0)
+    }
 }
