@@ -28,6 +28,16 @@ public final class SettingsStore {
     public let fileURL: URL
     public private(set) var lastLoadFailure: LoadFailure?
 
+    /// User presets the last load dropped because they claimed to be built in
+    /// or reused a built-in identifier.
+    ///
+    /// Empty after a clean load. Kept separate from `lastLoadFailure` because
+    /// the load itself succeeded: something was cleaned up, nothing was lost to
+    /// an error. Without this the correction is invisible, and a preset that
+    /// some future bug mislabels would simply disappear on the next launch with
+    /// nothing to debug from.
+    public private(set) var lastDroppedPresets: [Preset] = []
+
     private let directory: URL
     private let fileManager = FileManager.default
 
@@ -43,6 +53,8 @@ public final class SettingsStore {
     }
 
     public func load() -> Settings {
+        lastDroppedPresets = []
+
         guard fileManager.fileExists(atPath: fileURL.path) else {
             lastLoadFailure = .missing
             return .defaults
@@ -90,6 +102,9 @@ public final class SettingsStore {
         var result = settings
         result.userPresets = settings.userPresets.filter {
             !$0.isBuiltIn && !builtInIdentifiers.contains($0.id)
+        }
+        lastDroppedPresets = settings.userPresets.filter { candidate in
+            !result.userPresets.contains { $0.id == candidate.id }
         }
         return result
     }

@@ -161,4 +161,62 @@ struct SettingsStoreTests {
         #expect(path.contains("Application Support"))
         #expect(path.hasSuffix("/Sonora"))
     }
+
+    @Test("dropped presets are reported rather than vanishing quietly")
+    func reportsDroppedPresets() throws {
+        let store = SettingsStore(directory: try makeTemporaryDirectory())
+
+        var settings = Settings.defaults
+        settings.userPresets = [
+            Preset(
+                id: "forged", name: "Forged", preampDecibels: 0,
+                gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], isBuiltIn: true
+            ),
+            Preset(
+                id: "genuine", name: "Genuine", preampDecibels: 0,
+                gains: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0], isBuiltIn: false
+            ),
+        ]
+        try store.save(settings)
+
+        #expect(store.load().userPresets.map(\.id) == ["genuine"])
+        #expect(store.lastDroppedPresets.map(\.id) == ["forged"])
+    }
+
+    @Test("a clean load reports nothing dropped")
+    func cleanLoadDropsNothing() throws {
+        let store = SettingsStore(directory: try makeTemporaryDirectory())
+
+        var settings = Settings.defaults
+        settings.userPresets = [
+            Preset(
+                id: "genuine", name: "Genuine", preampDecibels: 0,
+                gains: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0], isBuiltIn: false
+            ),
+        ]
+        try store.save(settings)
+
+        #expect(store.load().userPresets.count == 1)
+        #expect(store.lastDroppedPresets.isEmpty)
+    }
+
+    @Test("a quarantine that cannot be written is reported as such")
+    func unquarantinableCorruptFile() throws {
+        let directory = try makeTemporaryDirectory()
+        let store = SettingsStore(directory: directory)
+        try Data("this is not json".utf8).write(to: store.fileURL)
+
+        // A read-only directory means the corrupt file cannot be moved aside.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o500], ofItemAtPath: directory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700], ofItemAtPath: directory.path
+            )
+        }
+
+        #expect(store.load() == Settings.defaults)
+        #expect(store.lastLoadFailure == .corrupt(backupURL: nil))
+    }
 }
