@@ -7,11 +7,14 @@ let package = Package(
     products: [
         .library(name: "SonoraDSP", targets: ["SonoraDSP"]),
         .library(name: "SonoraProfiles", targets: ["SonoraProfiles"]),
+        .library(name: "SonoraPersistence", targets: ["SonoraPersistence"]),
     ],
     targets: [
         .target(name: "SonoraDSP"),
         .testTarget(name: "SonoraDSPTests", dependencies: ["SonoraDSP"]),
         .target(name: "SonoraProfiles", dependencies: ["SonoraDSP"]),
         .testTarget(name: "SonoraProfilesTests", dependencies: ["SonoraProfiles"]),
+        .target(name: "SonoraPersistence", dependencies: ["SonoraProfiles"]),
+        .testTarget(name: "SonoraPersistenceTests", dependencies: ["SonoraPersistence"]),
     ]
 )
