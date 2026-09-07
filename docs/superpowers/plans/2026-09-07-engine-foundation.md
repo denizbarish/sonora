@@ -604,18 +604,46 @@ struct BiquadTests {
         #expect(maximum < 5)
     }
 
-    @Test("reset clears the filter state")
+    @Test("reset clears both state variables")
     func reset() {
         let coefficients = BiquadCoefficients(
             kind: .peaking, frequency: 1_000, q: 1, gainDecibels: 12, sampleRate: sampleRate
         )
+        var reference = Biquad(coefficients: coefficients)
         var filter = Biquad(coefficients: coefficients)
 
         for _ in 0..<100 { _ = filter.process(1) }
         filter.reset()
 
-        // With cleared state the first sample only sees the b0 term.
+        // With cleared state the first sample only sees the b0 term. The
+        // reference filter consumes the same sample so the two stay in step.
         #expect(abs(filter.process(1) - coefficients.b0) < 0.000_01)
+        #expect(abs(reference.process(1) - coefficients.b0) < 0.000_01)
+
+        // state2 does not reach the output until the second sample, so a reset
+        // that cleared only state1 would still pass the assertion above. Running
+        // the reset filter alongside a fresh one catches it: from here on the
+        // two must agree sample for sample.
+        for _ in 0..<8 {
+            #expect(abs(filter.process(1) - reference.process(1)) < 0.000_01)
+        }
+    }
+
+    @Test("state is flushed instead of decaying into subnormals")
+    func denormalFlush() {
+        let coefficients = BiquadCoefficients(
+            kind: .peaking, frequency: 100, q: 4, gainDecibels: 12, sampleRate: sampleRate
+        )
+        var filter = Biquad(coefficients: coefficients)
+
+        for _ in 0..<1_000 { _ = filter.process(1) }
+
+        var output: Float = 0
+        for _ in 0..<200_000 { output = filter.process(0) }
+
+        // Without flushing, the ringing tail decays through the subnormal range
+        // and never reaches exactly zero.
+        #expect(output == 0)
     }
 
     @Test("an impulse produces a decaying finite response")
@@ -656,6 +684,24 @@ Create `Sources/SonoraDSP/Biquad.swift`:
 /// the real-time audio thread.
 public struct Biquad: Sendable {
 
+    /// The smallest state magnitude the filter keeps. Anything under this is
+    /// flushed to zero.
+    ///
+    /// An IIR filter's state decays exponentially toward zero whenever the input
+    /// goes quiet, between tracks or during a fade. Once it reaches subnormal
+    /// floats, some CPUs fall back to microcode where a single multiply can cost
+    /// hundreds of cycles. That is enough to stall a render callback that is
+    /// otherwise allocation free and lock free, so the usual real-time
+    /// discipline does not cover it.
+    ///
+    /// Subnormals start below 1.18e-38. Flushing at 1e-25 stops the decay well
+    /// before that, and 1e-25 is roughly -500 dBFS, hundreds of decibels below
+    /// the quietest audible sample, so nothing is lost.
+    ///
+    /// Flushing rather than adding a tiny DC term keeps silence exactly silent:
+    /// a zero input into a settled filter still returns exactly zero.
+    private static let denormalFloor: Float = 1e-25
+
     /// The filter shape. Assigning new coefficients does not clear the state,
     /// which is what keeps the audio continuous while a slider moves.
     public var coefficients: BiquadCoefficients
@@ -671,9 +717,14 @@ public struct Biquad: Sendable {
     @inline(__always)
     public mutating func process(_ input: Float) -> Float {
         let output = coefficients.b0 * input + state1
-        state1 = coefficients.b1 * input - coefficients.a1 * output + state2
-        state2 = coefficients.b2 * input - coefficients.a2 * output
+        state1 = Self.flushed(coefficients.b1 * input - coefficients.a1 * output + state2)
+        state2 = Self.flushed(coefficients.b2 * input - coefficients.a2 * output)
         return output
+    }
+
+    @inline(__always)
+    private static func flushed(_ value: Float) -> Float {
+        abs(value) < denormalFloor ? 0 : value
     }
 
     /// Clears the filter memory. Call after a sample rate or format change,
@@ -688,7 +739,7 @@ public struct Biquad: Sendable {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `swift test --filter BiquadTests`
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 5: Commit**
 
