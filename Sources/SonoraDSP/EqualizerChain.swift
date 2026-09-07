@@ -9,6 +9,24 @@
 /// produced on the interface thread, either through `update(bands:)` or through
 /// the static `coefficients(for:sampleRate:)` helper. The audio thread only ever
 /// calls `applyCoefficients`, which copies finished floats.
+///
+/// ## Threading contract
+///
+/// This is a contract, not a suggestion. The chain has no internal
+/// synchronisation, and `@unchecked Sendable` asserts that callers honour the
+/// split below rather than providing any safety itself.
+///
+/// - `update(bands:)` is the setup path. Call it before the render callback
+///   starts, or while it is stopped. Never while audio is flowing.
+/// - `applyCoefficients` is the live path. Call it only from the render callback
+///   itself, with coefficients already resolved elsewhere. In Sonora the
+///   parameter bridge does that resolving on the interface thread and hands the
+///   finished floats across.
+///
+/// Calling `update(bands:)` while the render callback runs is a data race. A
+/// five float coefficient set has no atomic store, so the audio thread can read
+/// a torn mix of old and new values and land on an unstable pole pair, which is
+/// audible as a burst of noise rather than the click the split exists to avoid.
 public final class EqualizerChain: @unchecked Sendable {
 
     /// Upper bound on bands, so storage is allocated once. The graphic
@@ -30,8 +48,11 @@ public final class EqualizerChain: @unchecked Sendable {
         let channels = max(channelCount, 1)
         self.sampleRate = sampleRate
         self.channelCount = channels
-        self.bands = EqualizerBand.graphicDefaults
-        self.bandCount = EqualizerBand.graphicDefaults.count
+        // Left empty on purpose: `update` below is the single source of truth
+        // for both, and setting them here would only make the coefficient work
+        // it does look like it had already happened.
+        self.bands = []
+        self.bandCount = 0
 
         let storage = UnsafeMutableBufferPointer<Biquad>.allocate(
             capacity: channels * Self.maximumBandCount
@@ -56,17 +77,19 @@ public final class EqualizerChain: @unchecked Sendable {
         bands = clamped
         bandCount = clamped.count
 
-        for channel in 0..<channelCount {
-            let base = channel * Self.maximumBandCount
-            for index in 0..<clamped.count {
-                let band = clamped[index]
-                filters[base + index].coefficients = BiquadCoefficients(
-                    kind: band.kind,
-                    frequency: band.frequency,
-                    q: band.q,
-                    gainDecibels: band.gainDecibels,
-                    sampleRate: sampleRate
-                )
+        // Every channel gets the same coefficients, so the trigonometry runs
+        // once per band rather than once per band per channel.
+        for index in 0..<clamped.count {
+            let band = clamped[index]
+            let computed = BiquadCoefficients(
+                kind: band.kind,
+                frequency: band.frequency,
+                q: band.q,
+                gainDecibels: band.gainDecibels,
+                sampleRate: sampleRate
+            )
+            for channel in 0..<channelCount {
+                filters[channel * Self.maximumBandCount + index].coefficients = computed
             }
         }
     }
@@ -77,7 +100,9 @@ public final class EqualizerChain: @unchecked Sendable {
     /// No allocation, no locks, no coefficient math. `bands` is deliberately not
     /// updated, because it is interface-side bookkeeping.
     public func applyCoefficients(_ source: UnsafePointer<BiquadCoefficients>, count: Int) {
-        let usable = min(count, Self.maximumBandCount)
+        // A negative count would make `0..<usable` trap, and trapping on the
+        // audio thread kills the render callback outright.
+        let usable = min(max(count, 0), Self.maximumBandCount)
         bandCount = usable
 
         for channel in 0..<channelCount {
@@ -94,7 +119,7 @@ public final class EqualizerChain: @unchecked Sendable {
     ///   - buffer: interleaved samples, `frameCount * channelCount` of them.
     ///   - frameCount: number of frames, not samples.
     public func process(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int) {
-        guard bandCount > 0 else { return }
+        guard bandCount > 0, frameCount > 0 else { return }
 
         for channel in 0..<channelCount {
             let base = channel * Self.maximumBandCount
@@ -118,6 +143,10 @@ public final class EqualizerChain: @unchecked Sendable {
 
     /// The combined response of the active bands at one frequency, in decibels.
     /// Used to draw the equalizer curve.
+    ///
+    /// Reads channel zero's slots, which start at offset zero, because every
+    /// channel always holds identical coefficients. If per-channel bands are
+    /// ever added, this has to take a channel argument.
     public func magnitudeDecibels(atFrequency frequency: Double) -> Float {
         var total: Float = 0
         for index in 0..<bandCount {

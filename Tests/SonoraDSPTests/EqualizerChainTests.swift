@@ -134,8 +134,17 @@ struct EqualizerChainTests {
             chain.applyCoefficients(pointer.baseAddress!, count: tooMany.count)
         }
 
-        // Identity coefficients everywhere means the chain is transparent, and
-        // clamping must not have read past its own storage.
+        // What this proves: an oversized source is accepted, the clamp keeps
+        // the loop inside the allocation, and the chain stays transparent.
+        //
+        // What it cannot prove: that the clamp lands on exactly
+        // maximumBandCount. Writes past the boundary land in the next channel's
+        // slots and are then overwritten by that channel's own pass, so an
+        // off-by-one is self-masking and invisible to any behavioural check.
+        // Bounds correctness rests on three other things instead: the
+        // arithmetic being derived by hand, `UnsafeMutableBufferPointer`
+        // subscripts being bounds checked in debug builds so the whole suite
+        // already exercises indexing, and the AddressSanitizer job in CI.
         var buffer = [Float](repeating: 0.3, count: 256)
         buffer.withUnsafeMutableBufferPointer { pointer in
             chain.process(pointer.baseAddress!, frameCount: 128)
