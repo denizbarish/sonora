@@ -7,7 +7,10 @@ import Foundation
 /// `rampSeconds` worth of samples.
 ///
 /// This is a value type with no allocations, safe to advance from the real-time
-/// audio thread.
+/// audio thread. `Sendable` here certifies that copies cross isolation domains
+/// safely; it does not make a single shared instance safe to mutate from two
+/// threads at once. Owners must not write `target` while another thread calls
+/// `nextValue()` on the same instance.
 public struct SmoothedValue: Sendable {
 
     /// The value the ramp is heading toward.
@@ -44,8 +47,16 @@ public struct SmoothedValue: Sendable {
         coefficient = Self.coefficient(sampleRate: sampleRate, rampSeconds: rampSeconds)
     }
 
+    /// A coefficient of 1 means "no smoothing": `nextValue` jumps straight to
+    /// the target. That is the deliberate fallback for a nonsensical sample rate
+    /// or ramp duration, including NaN, which fails both comparisons. Snapping is
+    /// wrong-sounding but safe; a NaN coefficient would poison the whole signal.
+    ///
+    /// Computed in `Double` and narrowed at the end. This runs in `init` and
+    /// `setSampleRate`, never on the audio path, so there is no reason to give up
+    /// the precision.
     private static func coefficient(sampleRate: Double, rampSeconds: Float) -> Float {
         guard sampleRate > 0, rampSeconds > 0 else { return 1 }
-        return 1 - exp(-1 / (Float(sampleRate) * rampSeconds))
+        return Float(1 - exp(-1 / (sampleRate * Double(rampSeconds))))
     }
 }
