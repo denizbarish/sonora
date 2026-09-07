@@ -700,6 +700,13 @@ public struct Biquad: Sendable {
     ///
     /// Flushing rather than adding a tiny DC term keeps silence exactly silent:
     /// a zero input into a settled filter still returns exactly zero.
+    ///
+    /// Both state variables are flushed together or not at all. They are in
+    /// quadrature, so on a high Q section they cross any fixed floor at
+    /// different samples; zeroing one on its own perturbs the coupled recurrence
+    /// and the perturbation sustains itself as a limit cycle that never decays.
+    /// A 100 Hz, Q 4, +12 dB section settles into exactly that, oscillating
+    /// forever around 2e-23 instead of reaching zero.
     private static let denormalFloor: Float = 1e-25
 
     /// The filter shape. Assigning new coefficients does not clear the state,
@@ -717,14 +724,21 @@ public struct Biquad: Sendable {
     @inline(__always)
     public mutating func process(_ input: Float) -> Float {
         let output = coefficients.b0 * input + state1
-        state1 = Self.flushed(coefficients.b1 * input - coefficients.a1 * output + state2)
-        state2 = Self.flushed(coefficients.b2 * input - coefficients.a2 * output)
-        return output
-    }
+        let next1 = coefficients.b1 * input - coefficients.a1 * output + state2
+        let next2 = coefficients.b2 * input - coefficients.a2 * output
 
-    @inline(__always)
-    private static func flushed(_ value: Float) -> Float {
-        abs(value) < denormalFloor ? 0 : value
+        // Both or neither. See the note on `denormalFloor`: flushing one state
+        // variable alone leaves the section ringing forever at a level it can
+        // never decay past.
+        if abs(next1) < Self.denormalFloor, abs(next2) < Self.denormalFloor {
+            state1 = 0
+            state2 = 0
+        } else {
+            state1 = next1
+            state2 = next2
+        }
+
+        return output
     }
 
     /// Clears the filter memory. Call after a sample rate or format change,
@@ -906,8 +920,15 @@ struct EqualizerChainTests {
             chain.applyCoefficients(pointer.baseAddress!, count: tooMany.count)
         }
 
-        // Identity coefficients everywhere means the chain is transparent, and
-        // clamping must not have read past its own storage.
+        // What this proves: an oversized source is accepted, the clamp keeps
+        // the loop inside the allocation, and the chain stays transparent.
+        //
+        // What it cannot prove: that the clamp lands on exactly
+        // maximumBandCount. Writes past the boundary land in the next channel's
+        // slots and are then overwritten by that channel's own pass, so an
+        // off-by-one is self-masking and invisible to any behavioural check.
+        // Bounds correctness here rests on the arithmetic being derived by hand
+        // and on the AddressSanitizer job in CI, not on this test.
         var buffer = [Float](repeating: 0.3, count: 256)
         buffer.withUnsafeMutableBufferPointer { pointer in
             chain.process(pointer.baseAddress!, frameCount: 128)
@@ -1006,6 +1027,24 @@ Create `Sources/SonoraDSP/EqualizerChain.swift`:
 /// produced on the interface thread, either through `update(bands:)` or through
 /// the static `coefficients(for:sampleRate:)` helper. The audio thread only ever
 /// calls `applyCoefficients`, which copies finished floats.
+///
+/// ## Threading contract
+///
+/// This is a contract, not a suggestion. The chain has no internal
+/// synchronisation, and `@unchecked Sendable` asserts that callers honour the
+/// split below rather than providing any safety itself.
+///
+/// - `update(bands:)` is the setup path. Call it before the render callback
+///   starts, or while it is stopped. Never while audio is flowing.
+/// - `applyCoefficients` is the live path. Call it only from the render callback
+///   itself, with coefficients already resolved elsewhere. In Sonora the
+///   parameter bridge does that resolving on the interface thread and hands the
+///   finished floats across.
+///
+/// Calling `update(bands:)` while the render callback runs is a data race. A
+/// five float coefficient set has no atomic store, so the audio thread can read
+/// a torn mix of old and new values and land on an unstable pole pair, which is
+/// audible as a burst of noise rather than the click the split exists to avoid.
 public final class EqualizerChain: @unchecked Sendable {
 
     /// Upper bound on bands, so storage is allocated once. The graphic
@@ -1027,8 +1066,11 @@ public final class EqualizerChain: @unchecked Sendable {
         let channels = max(channelCount, 1)
         self.sampleRate = sampleRate
         self.channelCount = channels
-        self.bands = EqualizerBand.graphicDefaults
-        self.bandCount = EqualizerBand.graphicDefaults.count
+        // Left empty on purpose: `update` below is the single source of truth
+        // for both, and setting them here would only make the coefficient work
+        // it does look like it had already happened.
+        self.bands = []
+        self.bandCount = 0
 
         let storage = UnsafeMutableBufferPointer<Biquad>.allocate(
             capacity: channels * Self.maximumBandCount
@@ -1053,17 +1095,19 @@ public final class EqualizerChain: @unchecked Sendable {
         bands = clamped
         bandCount = clamped.count
 
-        for channel in 0..<channelCount {
-            let base = channel * Self.maximumBandCount
-            for index in 0..<clamped.count {
-                let band = clamped[index]
-                filters[base + index].coefficients = BiquadCoefficients(
-                    kind: band.kind,
-                    frequency: band.frequency,
-                    q: band.q,
-                    gainDecibels: band.gainDecibels,
-                    sampleRate: sampleRate
-                )
+        // Every channel gets the same coefficients, so the trigonometry runs
+        // once per band rather than once per band per channel.
+        for index in 0..<clamped.count {
+            let band = clamped[index]
+            let computed = BiquadCoefficients(
+                kind: band.kind,
+                frequency: band.frequency,
+                q: band.q,
+                gainDecibels: band.gainDecibels,
+                sampleRate: sampleRate
+            )
+            for channel in 0..<channelCount {
+                filters[channel * Self.maximumBandCount + index].coefficients = computed
             }
         }
     }
@@ -1074,7 +1118,9 @@ public final class EqualizerChain: @unchecked Sendable {
     /// No allocation, no locks, no coefficient math. `bands` is deliberately not
     /// updated, because it is interface-side bookkeeping.
     public func applyCoefficients(_ source: UnsafePointer<BiquadCoefficients>, count: Int) {
-        let usable = min(count, Self.maximumBandCount)
+        // A negative count would make `0..<usable` trap, and trapping on the
+        // audio thread kills the render callback outright.
+        let usable = min(max(count, 0), Self.maximumBandCount)
         bandCount = usable
 
         for channel in 0..<channelCount {
@@ -1091,7 +1137,7 @@ public final class EqualizerChain: @unchecked Sendable {
     ///   - buffer: interleaved samples, `frameCount * channelCount` of them.
     ///   - frameCount: number of frames, not samples.
     public func process(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int) {
-        guard bandCount > 0 else { return }
+        guard bandCount > 0, frameCount > 0 else { return }
 
         for channel in 0..<channelCount {
             let base = channel * Self.maximumBandCount
@@ -1115,6 +1161,10 @@ public final class EqualizerChain: @unchecked Sendable {
 
     /// The combined response of the active bands at one frequency, in decibels.
     /// Used to draw the equalizer curve.
+    ///
+    /// Reads channel zero's slots, which start at offset zero, because every
+    /// channel always holds identical coefficients. If per-channel bands are
+    /// ever added, this has to take a channel argument.
     public func magnitudeDecibels(atFrequency frequency: Double) -> Float {
         var total: Float = 0
         for index in 0..<bandCount {
@@ -2216,6 +2266,13 @@ jobs:
 
       - name: Test
         run: swift test --parallel
+
+      # EqualizerChain does unchecked pointer arithmetic over a flat filter
+      # buffer. An off-by-one there is silent memory corruption in release
+      # builds and cannot be caught behaviourally, so the suite also runs under
+      # AddressSanitizer.
+      - name: Test under AddressSanitizer
+        run: swift test --sanitize=address
 ```
 
 - [ ] **Step 2: Verify the workflow file parses**
