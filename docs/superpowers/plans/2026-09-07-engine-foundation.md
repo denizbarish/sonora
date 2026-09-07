@@ -45,6 +45,12 @@
 
 - [ ] **Step 1: Create the package manifest**
 
+The manifest declares only the targets that have source files. SwiftPM refuses to
+resolve a package containing an empty target, so `SonoraProfiles` and
+`SonoraPersistence` are added later, by the tasks that populate them (Task 6 and
+Task 7). Do not declare them here, and do not create placeholder source files to
+work around the validation error.
+
 Create `Package.swift`:
 
 ```swift
@@ -56,16 +62,10 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "SonoraDSP", targets: ["SonoraDSP"]),
-        .library(name: "SonoraProfiles", targets: ["SonoraProfiles"]),
-        .library(name: "SonoraPersistence", targets: ["SonoraPersistence"]),
     ],
     targets: [
         .target(name: "SonoraDSP"),
-        .target(name: "SonoraProfiles", dependencies: ["SonoraDSP"]),
-        .target(name: "SonoraPersistence", dependencies: ["SonoraProfiles"]),
         .testTarget(name: "SonoraDSPTests", dependencies: ["SonoraDSP"]),
-        .testTarget(name: "SonoraProfilesTests", dependencies: ["SonoraProfiles"]),
-        .testTarget(name: "SonoraPersistenceTests", dependencies: ["SonoraPersistence"]),
     ]
 )
 ```
@@ -191,9 +191,17 @@ public struct SmoothedValue: Sendable {
         coefficient = Self.coefficient(sampleRate: sampleRate, rampSeconds: rampSeconds)
     }
 
+    /// A coefficient of 1 means "no smoothing": `nextValue` jumps straight to
+    /// the target. That is the deliberate fallback for a nonsensical sample rate
+    /// or ramp duration, including NaN, which fails both comparisons. Snapping is
+    /// wrong-sounding but safe; a NaN coefficient would poison the whole signal.
+    ///
+    /// Computed in `Double` and narrowed at the end. This runs in `init` and
+    /// `setSampleRate`, never on the audio path, so there is no reason to give up
+    /// the precision.
     private static func coefficient(sampleRate: Double, rampSeconds: Float) -> Float {
         guard sampleRate > 0, rampSeconds > 0 else { return 1 }
-        return 1 - exp(-1 / (Float(sampleRate) * rampSeconds))
+        return Float(1 - exp(-1 / (sampleRate * Double(rampSeconds))))
     }
 }
 ```
@@ -1537,6 +1545,7 @@ git commit -m "feat: add soft limiter and complete preamp to limiter DSP chain"
 ### Task 6: Presets
 
 **Files:**
+- Modify: `Package.swift`
 - Create: `Sources/SonoraProfiles/Preset.swift`
 - Create: `Sources/SonoraProfiles/BuiltInPresets.swift`
 - Test: `Tests/SonoraProfilesTests/PresetTests.swift`
@@ -1545,7 +1554,25 @@ git commit -m "feat: add soft limiter and complete preamp to limiter DSP chain"
 - Consumes: `EqualizerBand` from Task 4.
 - Produces: `struct Preset: Codable, Equatable, Identifiable, Sendable` with `let id: String`, `var name: String`, `var preampDecibels: Double`, `var bands: [EqualizerBand]`, `let isBuiltIn: Bool`; `enum BuiltInPresets` with `static let all: [Preset]` and `static let flat: Preset`; `Preset.init(id:name:preampDecibels:gains:)` convenience taking ten gain values. Used by Task 7 (settings) and Task 14 (menu).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the target**
+
+`SonoraProfiles` has no target yet, because SwiftPM refuses to resolve a package
+with an empty target. Add it now, in the same task that gives it source files.
+
+Modify `Package.swift`, adding to `products`:
+
+```swift
+        .library(name: "SonoraProfiles", targets: ["SonoraProfiles"]),
+```
+
+and to `targets`:
+
+```swift
+        .target(name: "SonoraProfiles", dependencies: ["SonoraDSP"]),
+        .testTarget(name: "SonoraProfilesTests", dependencies: ["SonoraProfiles"]),
+```
+
+- [ ] **Step 2: Write the failing test**
 
 Create `Tests/SonoraProfilesTests/PresetTests.swift`:
 
@@ -1627,12 +1654,12 @@ struct PresetTests {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 3: Run it to verify it fails**
 
 Run: `swift test --filter PresetTests`
 Expected: FAIL, compiler error `cannot find 'BuiltInPresets' in scope`.
 
-- [ ] **Step 3: Write the preset model**
+- [ ] **Step 4: Write the preset model**
 
 Create `Sources/SonoraProfiles/Preset.swift`:
 
@@ -1690,7 +1717,7 @@ public struct Preset: Codable, Equatable, Identifiable, Sendable {
 }
 ```
 
-- [ ] **Step 4: Write the built-in presets**
+- [ ] **Step 5: Write the built-in presets**
 
 Create `Sources/SonoraProfiles/BuiltInPresets.swift`:
 
@@ -1768,15 +1795,22 @@ public enum BuiltInPresets {
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `swift test --filter PresetTests`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Verify the package resolves from a clean checkout**
+
+Run: `git stash -u && swift build 2>&1 | tail -3; git stash pop`
+Expected: the build succeeds against committed files only. If it fails with
+"Source files for target X should be located under...", a target is declared
+without sources. Never add a placeholder file to silence this.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add Sources/SonoraProfiles Tests/SonoraProfilesTests
+git add Package.swift Sources/SonoraProfiles Tests/SonoraProfilesTests
 git commit -m "feat: add preset model and built-in presets"
 ```
 
@@ -1785,6 +1819,7 @@ git commit -m "feat: add preset model and built-in presets"
 ### Task 7: Settings and the settings store
 
 **Files:**
+- Modify: `Package.swift`
 - Create: `Sources/SonoraPersistence/Settings.swift`
 - Create: `Sources/SonoraPersistence/SettingsStore.swift`
 - Test: `Tests/SonoraPersistenceTests/SettingsStoreTests.swift`
@@ -1796,7 +1831,22 @@ git commit -m "feat: add preset model and built-in presets"
   - `final class SettingsStore` with `init(directory: URL)`, `let fileURL: URL`, `func load() -> Settings`, `func save(_ settings: Settings) throws`, `private(set) var lastLoadFailure: LoadFailure?`, `enum LoadFailure: Equatable { case missing, unreadable, corrupt(backupURL: URL), futureVersion(Int) }`, `static func defaultDirectory() -> URL`.
 - Used by Task 14.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the target**
+
+Modify `Package.swift`, adding to `products`:
+
+```swift
+        .library(name: "SonoraPersistence", targets: ["SonoraPersistence"]),
+```
+
+and to `targets`:
+
+```swift
+        .target(name: "SonoraPersistence", dependencies: ["SonoraProfiles"]),
+        .testTarget(name: "SonoraPersistenceTests", dependencies: ["SonoraPersistence"]),
+```
+
+- [ ] **Step 2: Write the failing test**
 
 Create `Tests/SonoraPersistenceTests/SettingsStoreTests.swift`:
 
@@ -1907,12 +1957,12 @@ struct SettingsStoreTests {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 3: Run it to verify it fails**
 
 Run: `swift test --filter SettingsStoreTests`
 Expected: FAIL, compiler error `cannot find 'Settings' in scope`.
 
-- [ ] **Step 3: Write the settings model**
+- [ ] **Step 4: Write the settings model**
 
 Create `Sources/SonoraPersistence/Settings.swift`:
 
@@ -1955,7 +2005,7 @@ public struct Settings: Codable, Equatable, Sendable {
 }
 ```
 
-- [ ] **Step 4: Write the store**
+- [ ] **Step 5: Write the store**
 
 Create `Sources/SonoraPersistence/SettingsStore.swift`:
 
@@ -2053,20 +2103,20 @@ public final class SettingsStore {
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `swift test --filter SettingsStoreTests`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 6: Run the whole suite**
+- [ ] **Step 7: Run the whole suite**
 
 Run: `swift test`
 Expected: PASS, all suites, roughly 55 tests.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add Sources/SonoraPersistence Tests/SonoraPersistenceTests
+git add Package.swift Sources/SonoraPersistence Tests/SonoraPersistenceTests
 git commit -m "feat: add versioned settings store with corrupt file recovery"
 ```
 
