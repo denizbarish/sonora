@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Swift package tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_26.app
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test --parallel
+
+      # EqualizerChain does unchecked pointer arithmetic over a flat filter
+      # buffer. An off-by-one there is silent memory corruption in release
+      # builds and cannot be caught behaviourally, so the suite also runs under
+      # AddressSanitizer.
+      - name: Test under AddressSanitizer
+        run: swift test --sanitize=address
