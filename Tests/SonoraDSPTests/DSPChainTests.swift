@@ -147,4 +147,34 @@ struct DSPChainTests {
 
         #expect(buffer.allSatisfy { $0.isFinite })
     }
+
+    @Test("the overload indicator clears when the chain is bypassed")
+    func indicatorClearsOnBypass() {
+        let chain = DSPChain(sampleRate: sampleRate, channelCount: 2)
+        chain.preampDecibels = 12
+        var buffer = sineBuffer(frequency: 1_000, frameCount: 1_024, amplitude: 1.0)
+
+        buffer.withUnsafeMutableBufferPointer { pointer in
+            chain.process(pointer.baseAddress!, frameCount: 1_024)
+        }
+        #expect(chain.limiterIsEngaged == true)
+
+        chain.isBypassed = true
+        buffer.withUnsafeMutableBufferPointer { pointer in
+            chain.process(pointer.baseAddress!, frameCount: 1_024)
+        }
+        #expect(chain.limiterIsEngaged == false)
+    }
+
+    @Test("a NaN never leaves the chain")
+    func nanIsContained() {
+        let chain = DSPChain(sampleRate: sampleRate, channelCount: 2)
+        var buffer = [Float](repeating: .nan, count: 512)
+
+        buffer.withUnsafeMutableBufferPointer { pointer in
+            chain.process(pointer.baseAddress!, frameCount: 256)
+        }
+
+        #expect(buffer.allSatisfy { $0.isFinite })
+    }
 }

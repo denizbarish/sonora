@@ -61,4 +61,12 @@ struct SoftLimiterTests {
         limiter.clearEngagedFlag()
         #expect(limiter.isEngaged == false)
     }
+
+    @Test("NaN is replaced rather than passed on")
+    func nanIsReplaced() {
+        var limiter = SoftLimiter()
+
+        #expect(limiter.process(.nan) == 0)
+        #expect(limiter.isEngaged == true)
+    }
 }

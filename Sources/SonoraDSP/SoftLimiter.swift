@@ -26,6 +26,14 @@ public struct SoftLimiter: Sendable {
 
     @inline(__always)
     public mutating func process(_ input: Float) -> Float {
+        // This is the last stage before the samples reach the device, so a NaN
+        // arriving from a broken stage upstream would go straight out. Infinity
+        // needs no special case: the shaping below saturates it to the ceiling.
+        guard !input.isNaN else {
+            isEngaged = true
+            return 0
+        }
+
         let magnitude = abs(input)
         guard magnitude > Self.threshold else { return input }
 
