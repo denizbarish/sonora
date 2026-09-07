@@ -18,7 +18,7 @@ let package = Package(
             dependencies: [.product(name: "Atomics", package: "swift-atomics")]
         ),
         .target(name: "SonoraProfiles", dependencies: ["SonoraDSP"]),
-        .target(name: "SonoraPersistence", dependencies: ["SonoraProfiles"]),
+        .target(name: "SonoraPersistence", dependencies: ["SonoraProfiles", "SonoraDSP"]),
         .testTarget(name: "SonoraDSPTests", dependencies: ["SonoraDSP"]),
         .testTarget(name: "SonoraProfilesTests", dependencies: ["SonoraProfiles"]),
         .testTarget(name: "SonoraPersistenceTests", dependencies: ["SonoraPersistence"]),

@@ -1,3 +1,4 @@
+import SonoraProfiles
 import Foundation
 
 /// Reads and writes `Settings` as JSON on disk.
@@ -12,10 +13,16 @@ public final class SettingsStore {
         case missing
         /// The file exists but could not be read from disk.
         case unreadable
-        /// The file could not be decoded and was moved aside.
-        case corrupt(backupURL: URL)
+        /// The file could not be decoded. `backupURL` is where it was moved,
+        /// or nil when it could not be moved at all, in which case the same
+        /// file will fail again on the next launch.
+        case corrupt(backupURL: URL?)
         /// The file was written by a newer version of Sonora.
         case futureVersion(Int)
+        /// The file came from an older schema and no longer decodes. Reported
+        /// separately from `corrupt` so an out of date file is never mistaken
+        /// for garbage and quarantined.
+        case staleVersion(Int)
     }
 
     public let fileURL: URL
@@ -46,22 +53,45 @@ public final class SettingsStore {
             return .defaults
         }
 
-        // Read the version before the full decode, so a newer file is reported as
-        // a version problem rather than as corruption.
-        if let envelope = try? JSONDecoder().decode(SchemaEnvelope.self, from: data),
-           envelope.schemaVersion > Settings.currentSchemaVersion {
-            lastLoadFailure = .futureVersion(envelope.schemaVersion)
+        // Read the version before the full decode, so a version problem is
+        // never reported as corruption.
+        let storedVersion = (try? JSONDecoder().decode(SchemaEnvelope.self, from: data))?
+            .schemaVersion
+
+        if let storedVersion, storedVersion > Settings.currentSchemaVersion {
+            lastLoadFailure = .futureVersion(storedVersion)
             return .defaults
         }
 
         do {
             let settings = try JSONDecoder().decode(Settings.self, from: data)
             lastLoadFailure = nil
-            return settings
+            return reconciled(settings)
         } catch {
+            if let storedVersion, storedVersion < Settings.currentSchemaVersion {
+                lastLoadFailure = .staleVersion(storedVersion)
+                return .defaults
+            }
             lastLoadFailure = .corrupt(backupURL: backUpCorruptFile())
             return .defaults
         }
+    }
+
+    /// Strips claims a settings file is not allowed to make.
+    ///
+    /// `Preset` is `Codable`, so a hand edited or corrupted file can present a
+    /// user preset that claims to be built in, or one that reuses a built-in
+    /// identifier. The interface refuses to edit or delete built-in presets, so
+    /// such an entry becomes a ghost the user cannot remove, and a duplicated
+    /// identifier makes every lookup ambiguous. This is the disk boundary, so
+    /// this is where those claims are dropped.
+    private func reconciled(_ settings: Settings) -> Settings {
+        let builtInIdentifiers = Set(BuiltInPresets.all.map(\.id))
+        var result = settings
+        result.userPresets = settings.userPresets.filter {
+            !$0.isBuiltIn && !builtInIdentifiers.contains($0.id)
+        }
+        return result
     }
 
     public func save(_ settings: Settings) throws {
@@ -75,14 +105,24 @@ public final class SettingsStore {
         try encoder.encode(stored).write(to: fileURL, options: .atomic)
     }
 
-    /// Moves the unreadable file aside so the next launch starts clean while the
-    /// user keeps whatever was in it.
-    private func backUpCorruptFile() -> URL {
+    /// Moves the undecodable file aside so the next launch starts clean while
+    /// the user keeps whatever was in it.
+    ///
+    /// Returns nil when the move fails, for example on a read-only volume or a
+    /// full disk. Reporting that honestly matters: the alternative is naming a
+    /// backup file that was never written, while the original stays in place
+    /// and fails again on every launch with nothing to show for it.
+    private func backUpCorruptFile() -> URL? {
         let stamp = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
         let backupURL = directory.appendingPathComponent("settings-\(stamp).json.corrupt")
-        try? fileManager.moveItem(at: fileURL, to: backupURL)
-        return backupURL
+
+        do {
+            try fileManager.moveItem(at: fileURL, to: backupURL)
+            return backupURL
+        } catch {
+            return nil
+        }
     }
 
     private struct SchemaEnvelope: Decodable {

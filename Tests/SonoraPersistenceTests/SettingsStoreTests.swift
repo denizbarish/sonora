@@ -68,8 +68,10 @@ struct SettingsStoreTests {
             Issue.record("expected a corrupt failure, got \(String(describing: store.lastLoadFailure))")
             return
         }
-        #expect(FileManager.default.fileExists(atPath: backupURL.path))
-        #expect(backupURL.pathExtension == "corrupt")
+        let backup = try #require(backupURL, "the file should have been quarantined")
+        #expect(FileManager.default.fileExists(atPath: backup.path))
+        #expect(backup.pathExtension == "corrupt")
+        #expect(FileManager.default.fileExists(atPath: store.fileURL.path) == false)
     }
 
     @Test("a file from a newer schema falls back to defaults")
@@ -81,6 +83,64 @@ struct SettingsStoreTests {
 
         #expect(store.load() == Settings.defaults)
         #expect(store.lastLoadFailure == .futureVersion(99))
+    }
+
+    @Test("an unreadable file is reported rather than treated as missing")
+    func unreadableFile() throws {
+        let directory = try makeTemporaryDirectory()
+        let store = SettingsStore(directory: directory)
+        try Data("{}".utf8).write(to: store.fileURL)
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o000], ofItemAtPath: store.fileURL.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: store.fileURL.path
+            )
+        }
+
+        #expect(store.load() == Settings.defaults)
+        #expect(store.lastLoadFailure == .unreadable)
+    }
+
+    @Test("a user preset cannot claim to be built in")
+    func rejectsForgedBuiltInPresets() throws {
+        let store = SettingsStore(directory: try makeTemporaryDirectory())
+
+        var settings = Settings.defaults
+        settings.userPresets = [
+            Preset(
+                id: "forged", name: "Forged", preampDecibels: 0,
+                gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], isBuiltIn: true
+            ),
+            Preset(
+                id: BuiltInPresets.flat.id, name: "Impostor", preampDecibels: 0,
+                gains: [9, 0, 0, 0, 0, 0, 0, 0, 0, 0], isBuiltIn: false
+            ),
+            Preset(
+                id: "genuine", name: "Genuine", preampDecibels: -1,
+                gains: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0], isBuiltIn: false
+            ),
+        ]
+        try store.save(settings)
+
+        // The forged built-in and the identifier collision are both dropped;
+        // the honest one survives untouched.
+        #expect(store.load().userPresets.map(\.id) == ["genuine"])
+    }
+
+    @Test("an older schema is reported as stale, not as corrupt")
+    func staleVersionIsNotCorruption() throws {
+        let directory = try makeTemporaryDirectory()
+        let store = SettingsStore(directory: directory)
+        let payload = #"{"schemaVersion": 0, "isBypassed": false}"#
+        try Data(payload.utf8).write(to: store.fileURL)
+
+        #expect(store.load() == Settings.defaults)
+        #expect(store.lastLoadFailure == .staleVersion(0))
+        // A recoverable old file must not be quarantined.
+        #expect(FileManager.default.fileExists(atPath: store.fileURL.path))
     }
 
     @Test("saving creates the directory if it does not exist")
