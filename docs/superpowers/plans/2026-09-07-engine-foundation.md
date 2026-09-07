@@ -927,8 +927,10 @@ struct EqualizerChainTests {
         // maximumBandCount. Writes past the boundary land in the next channel's
         // slots and are then overwritten by that channel's own pass, so an
         // off-by-one is self-masking and invisible to any behavioural check.
-        // Bounds correctness here rests on the arithmetic being derived by hand
-        // and on the AddressSanitizer job in CI, not on this test.
+        // Bounds correctness rests on three other things instead: the
+        // arithmetic being derived by hand, `UnsafeMutableBufferPointer`
+        // subscripts being bounds checked in debug builds so the whole suite
+        // already exercises indexing, and the AddressSanitizer job in CI.
         var buffer = [Float](repeating: 0.3, count: 256)
         buffer.withUnsafeMutableBufferPointer { pointer in
             chain.process(pointer.baseAddress!, frameCount: 128)
