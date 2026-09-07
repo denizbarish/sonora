@@ -18,7 +18,18 @@ struct PresetTests {
 
     @Test("every built-in preset is well formed")
     func builtInsAreWellFormed() {
-        #expect(BuiltInPresets.all.count >= 6)
+        // Named individually rather than counted, so a preset dropped from
+        // `all` fails here instead of passing a loose count check.
+        let expected = [
+            BuiltInPresets.flat,
+            BuiltInPresets.bassBoost,
+            BuiltInPresets.trebleBoost,
+            BuiltInPresets.vocal,
+            BuiltInPresets.loudness,
+            BuiltInPresets.podcast,
+            BuiltInPresets.laptopSpeaker,
+        ]
+        #expect(BuiltInPresets.all.map(\.id) == expected.map(\.id))
 
         for preset in BuiltInPresets.all {
             #expect(preset.bands.count == 10)

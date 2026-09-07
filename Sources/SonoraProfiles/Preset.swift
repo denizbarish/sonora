@@ -26,6 +26,12 @@ public struct Preset: Codable, Equatable, Identifiable, Sendable {
     }
 
     /// Builds a preset from ten gain values laid over the graphic band layout.
+    ///
+    /// Traps if `gains` is the wrong length. That is deliberate for the
+    /// compile-time literals this is built for: a miscounted built-in preset is
+    /// a programming error and should never ship. Anything fed by user data,
+    /// such as an imported correction curve, must validate the count first and
+    /// use the full initialiser, or this will bring the whole app down.
     public init(
         id: String,
         name: String,
