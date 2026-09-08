@@ -1,0 +1,39 @@
+name: Sonora
+options:
+  bundleIdPrefix: com.sonora
+  deploymentTarget:
+    macOS: "14.4"
+  createIntermediateGroups: true
+
+packages:
+  SonoraCore:
+    path: ..
+
+targets:
+  Sonora:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sonora
+    dependencies:
+      - package: SonoraCore
+        product: SonoraDSP
+      - package: SonoraCore
+        product: SonoraProfiles
+      - package: SonoraCore
+        product: SonoraPersistence
+    info:
+      path: Sonora/Info.plist
+    entitlements:
+      path: Sonora/Sonora.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sonora.Sonora
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        INFOPLIST_FILE: Sonora/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
