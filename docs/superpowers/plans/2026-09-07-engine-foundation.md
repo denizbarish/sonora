@@ -19,7 +19,8 @@
 - Never use `AVAudioEngine` or `AVAudioUnitEQ` on the tap path. They cannot be retargeted to a tap-backed aggregate device and fail silently.
 - Never set `CATapDescription.isExclusive` after using `init(stereoGlobalTapButExcludeProcesses:)`. It is a direction flag, not a lock toggle.
 - The aggregate device's main sub-device must be a real output device. The tap is attached as a sub-tap.
-- Inside the `IOProc` block: no locks, no memory allocation, no Swift runtime metadata calls, no Objective-C messages, no logging, no file access.
+- Inside the `IOProc` block: no locks, no memory allocation, no Swift runtime metadata calls, no Objective-C messages, no logging, no file access. This includes Swift array traffic: audio path storage is preallocated `UnsafeMutableBufferPointer`, never `Array`.
+- Filter coefficients are computed on the interface thread only. The audio thread receives finished coefficients and copies plain floats. Nothing on the audio path calls `BiquadCoefficients.init(kind:frequency:q:gainDecibels:sampleRate:)`.
 - All gain and coefficient changes ramp over 30 ms. `rampCoefficient = 1 - exp(-1 / (sampleRate * 0.030))`.
 - Every failure path must end in bypass (tap destroyed, audio back on the normal system route) or a user-visible warning. No silently swallowed errors.
 - App Sandbox off (`com.apple.security.app-sandbox = false`), Hardened Runtime on.
@@ -44,6 +45,12 @@
 
 - [ ] **Step 1: Create the package manifest**
 
+The manifest declares only the targets that have source files. SwiftPM refuses to
+resolve a package containing an empty target, so `SonoraProfiles` and
+`SonoraPersistence` are added later, by the tasks that populate them (Task 6 and
+Task 7). Do not declare them here, and do not create placeholder source files to
+work around the validation error.
+
 Create `Package.swift`:
 
 ```swift
@@ -55,16 +62,10 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "SonoraDSP", targets: ["SonoraDSP"]),
-        .library(name: "SonoraProfiles", targets: ["SonoraProfiles"]),
-        .library(name: "SonoraPersistence", targets: ["SonoraPersistence"]),
     ],
     targets: [
         .target(name: "SonoraDSP"),
-        .target(name: "SonoraProfiles", dependencies: ["SonoraDSP"]),
-        .target(name: "SonoraPersistence", dependencies: ["SonoraProfiles"]),
         .testTarget(name: "SonoraDSPTests", dependencies: ["SonoraDSP"]),
-        .testTarget(name: "SonoraProfilesTests", dependencies: ["SonoraProfiles"]),
-        .testTarget(name: "SonoraPersistenceTests", dependencies: ["SonoraPersistence"]),
     ]
 )
 ```
@@ -104,7 +105,10 @@ struct SmoothedValueTests {
             _ = value.nextValue()
         }
 
-        #expect(abs(value.current - 2) < 0.001)
+        // A one-pole ramp leaves exp(-5) of the distance after five time
+        // constants, which is 0.0135 out of 2. Anything tighter is impossible
+        // for this filter, not a bug.
+        #expect(abs(value.current - 2) < 0.02)
     }
 
     @Test("snap jumps immediately without ramping")
@@ -187,9 +191,17 @@ public struct SmoothedValue: Sendable {
         coefficient = Self.coefficient(sampleRate: sampleRate, rampSeconds: rampSeconds)
     }
 
+    /// A coefficient of 1 means "no smoothing": `nextValue` jumps straight to
+    /// the target. That is the deliberate fallback for a nonsensical sample rate
+    /// or ramp duration, including NaN, which fails both comparisons. Snapping is
+    /// wrong-sounding but safe; a NaN coefficient would poison the whole signal.
+    ///
+    /// Computed in `Double` and narrowed at the end. This runs in `init` and
+    /// `setSampleRate`, never on the audio path, so there is no reason to give up
+    /// the precision.
     private static func coefficient(sampleRate: Double, rampSeconds: Float) -> Float {
         guard sampleRate > 0, rampSeconds > 0 else { return 1 }
-        return 1 - exp(-1 / (Float(sampleRate) * rampSeconds))
+        return Float(1 - exp(-1 / (sampleRate * Double(rampSeconds))))
     }
 }
 ```
@@ -592,18 +604,46 @@ struct BiquadTests {
         #expect(maximum < 5)
     }
 
-    @Test("reset clears the filter state")
+    @Test("reset clears both state variables")
     func reset() {
         let coefficients = BiquadCoefficients(
             kind: .peaking, frequency: 1_000, q: 1, gainDecibels: 12, sampleRate: sampleRate
         )
+        var reference = Biquad(coefficients: coefficients)
         var filter = Biquad(coefficients: coefficients)
 
         for _ in 0..<100 { _ = filter.process(1) }
         filter.reset()
 
-        // With cleared state the first sample only sees the b0 term.
+        // With cleared state the first sample only sees the b0 term. The
+        // reference filter consumes the same sample so the two stay in step.
         #expect(abs(filter.process(1) - coefficients.b0) < 0.000_01)
+        #expect(abs(reference.process(1) - coefficients.b0) < 0.000_01)
+
+        // state2 does not reach the output until the second sample, so a reset
+        // that cleared only state1 would still pass the assertion above. Running
+        // the reset filter alongside a fresh one catches it: from here on the
+        // two must agree sample for sample.
+        for _ in 0..<8 {
+            #expect(abs(filter.process(1) - reference.process(1)) < 0.000_01)
+        }
+    }
+
+    @Test("state is flushed instead of decaying into subnormals")
+    func denormalFlush() {
+        let coefficients = BiquadCoefficients(
+            kind: .peaking, frequency: 100, q: 4, gainDecibels: 12, sampleRate: sampleRate
+        )
+        var filter = Biquad(coefficients: coefficients)
+
+        for _ in 0..<1_000 { _ = filter.process(1) }
+
+        var output: Float = 0
+        for _ in 0..<200_000 { output = filter.process(0) }
+
+        // Without flushing, the ringing tail decays through the subnormal range
+        // and never reaches exactly zero.
+        #expect(output == 0)
     }
 
     @Test("an impulse produces a decaying finite response")
@@ -644,6 +684,31 @@ Create `Sources/SonoraDSP/Biquad.swift`:
 /// the real-time audio thread.
 public struct Biquad: Sendable {
 
+    /// The smallest state magnitude the filter keeps. Anything under this is
+    /// flushed to zero.
+    ///
+    /// An IIR filter's state decays exponentially toward zero whenever the input
+    /// goes quiet, between tracks or during a fade. Once it reaches subnormal
+    /// floats, some CPUs fall back to microcode where a single multiply can cost
+    /// hundreds of cycles. That is enough to stall a render callback that is
+    /// otherwise allocation free and lock free, so the usual real-time
+    /// discipline does not cover it.
+    ///
+    /// Subnormals start below 1.18e-38. Flushing at 1e-25 stops the decay well
+    /// before that, and 1e-25 is roughly -500 dBFS, hundreds of decibels below
+    /// the quietest audible sample, so nothing is lost.
+    ///
+    /// Flushing rather than adding a tiny DC term keeps silence exactly silent:
+    /// a zero input into a settled filter still returns exactly zero.
+    ///
+    /// Both state variables are flushed together or not at all. They are in
+    /// quadrature, so on a high Q section they cross any fixed floor at
+    /// different samples; zeroing one on its own perturbs the coupled recurrence
+    /// and the perturbation sustains itself as a limit cycle that never decays.
+    /// A 100 Hz, Q 4, +12 dB section settles into exactly that, oscillating
+    /// forever around 2e-23 instead of reaching zero.
+    private static let denormalFloor: Float = 1e-25
+
     /// The filter shape. Assigning new coefficients does not clear the state,
     /// which is what keeps the audio continuous while a slider moves.
     public var coefficients: BiquadCoefficients
@@ -659,8 +724,31 @@ public struct Biquad: Sendable {
     @inline(__always)
     public mutating func process(_ input: Float) -> Float {
         let output = coefficients.b0 * input + state1
-        state1 = coefficients.b1 * input - coefficients.a1 * output + state2
-        state2 = coefficients.b2 * input - coefficients.a2 * output
+        let next1 = coefficients.b1 * input - coefficients.a1 * output + state2
+        let next2 = coefficients.b2 * input - coefficients.a2 * output
+
+        // Non-finite state is flushed first, and for a different reason than
+        // denormals. Every comparison with NaN is false, so the floor test
+        // below can never catch it, and a NaN in the state feeds itself: from
+        // then on every sample comes out NaN however clean the input is. The
+        // limiter downstream turns that into silence, so one glitchy sample
+        // would mute the channel until the app restarts. Flushing lets the
+        // section heal on the very next sample instead.
+        //
+        // Then the denormal case, both or neither. See the note on
+        // `denormalFloor`: flushing one state variable alone leaves the section
+        // ringing forever at a level it can never decay past.
+        if !next1.isFinite || !next2.isFinite {
+            state1 = 0
+            state2 = 0
+        } else if abs(next1) < Self.denormalFloor, abs(next2) < Self.denormalFloor {
+            state1 = 0
+            state2 = 0
+        } else {
+            state1 = next1
+            state2 = next2
+        }
+
         return output
     }
 
@@ -676,7 +764,7 @@ public struct Biquad: Sendable {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `swift test --filter BiquadTests`
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -699,7 +787,7 @@ git commit -m "feat: add transposed direct form II biquad filter"
 - Produces:
   - `struct EqualizerBand: Codable, Equatable, Sendable` with `var kind: FilterKind`, `var frequency: Double`, `var q: Double`, `var gainDecibels: Double`, and `static let graphicDefaults: [EqualizerBand]` (the ten ISO bands at 0 dB).
   - `static let graphicFrequencies: [Double]` on `EqualizerBand`.
-  - `final class EqualizerChain` with `init(sampleRate: Double, channelCount: Int)`, `func update(bands: [EqualizerBand])`, `func process(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int)`, `func reset()`, `func magnitudeDecibels(atFrequency: Double) -> Float`, `var bands: [EqualizerBand] { get }`.
+  - `final class EqualizerChain` with `static let maximumBandCount = 32`, `init(sampleRate: Double, channelCount: Int)`, `func update(bands: [EqualizerBand])` (interface thread), `func applyCoefficients(_ source: UnsafePointer<BiquadCoefficients>, count: Int)` (real-time thread), `func process(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int)`, `func reset()`, `func magnitudeDecibels(atFrequency: Double) -> Float`, `var bands: [EqualizerBand] { get }`, and `static func coefficients(for bands: [EqualizerBand], sampleRate: Double) -> [BiquadCoefficients]`.
 - Used by Task 5 (`DSPChain`) and Task 13 (parameter bridge).
 
 - [ ] **Step 1: Write the failing test**
@@ -812,6 +900,67 @@ struct EqualizerChainTests {
         #expect(abs(predicted - measured) < 0.3)
     }
 
+    @Test("precomputed coefficients produce the same response as update")
+    func applyCoefficientsMatchesUpdate() {
+        var bands = EqualizerBand.graphicDefaults
+        bands[6].gainDecibels = -7  // 2 kHz
+
+        let viaUpdate = EqualizerChain(sampleRate: sampleRate, channelCount: 2)
+        viaUpdate.update(bands: bands)
+
+        let viaCoefficients = EqualizerChain(sampleRate: sampleRate, channelCount: 2)
+        let computed = EqualizerChain.coefficients(for: bands, sampleRate: sampleRate)
+        computed.withUnsafeBufferPointer { pointer in
+            viaCoefficients.applyCoefficients(pointer.baseAddress!, count: computed.count)
+        }
+
+        let expected = measuredGainDecibels(chain: viaUpdate, frequency: 2_000).left
+        let actual = measuredGainDecibels(chain: viaCoefficients, frequency: 2_000).left
+        #expect(abs(actual - expected) < 0.001)
+        #expect(abs(actual + 7) < 0.5)
+    }
+
+    @Test("applyCoefficients clamps to the maximum band count")
+    func applyCoefficientsClamps() {
+        let chain = EqualizerChain(sampleRate: sampleRate, channelCount: 2)
+        let tooMany = [BiquadCoefficients](
+            repeating: .identity, count: EqualizerChain.maximumBandCount + 8
+        )
+
+        tooMany.withUnsafeBufferPointer { pointer in
+            chain.applyCoefficients(pointer.baseAddress!, count: tooMany.count)
+        }
+
+        // What this proves: an oversized source is accepted, the clamp keeps
+        // the loop inside the allocation, and the chain stays transparent.
+        //
+        // What it cannot prove: that the clamp lands on exactly
+        // maximumBandCount. Writes past the boundary land in the next channel's
+        // slots and are then overwritten by that channel's own pass, so an
+        // off-by-one is self-masking and invisible to any behavioural check.
+        // Bounds correctness rests on three other things instead: the
+        // arithmetic being derived by hand, `UnsafeMutableBufferPointer`
+        // subscripts being bounds checked in debug builds so the whole suite
+        // already exercises indexing, and the AddressSanitizer job in CI.
+        var buffer = [Float](repeating: 0.3, count: 256)
+        buffer.withUnsafeMutableBufferPointer { pointer in
+            chain.process(pointer.baseAddress!, frameCount: 128)
+        }
+        #expect(buffer.allSatisfy { abs($0 - 0.3) < 0.000_01 })
+    }
+
+    @Test("update beyond the maximum band count keeps only what fits")
+    func updateClamps() {
+        let chain = EqualizerChain(sampleRate: sampleRate, channelCount: 2)
+        let tooMany = (0..<(EqualizerChain.maximumBandCount + 5)).map { index in
+            EqualizerBand(frequency: 100 + Double(index) * 100, gainDecibels: 0)
+        }
+
+        chain.update(bands: tooMany)
+
+        #expect(chain.bands.count == EqualizerChain.maximumBandCount)
+    }
+
     @Test("processing never produces a non-finite sample")
     func staysFinite() {
         let chain = EqualizerChain(sampleRate: sampleRate, channelCount: 2)
@@ -882,101 +1031,185 @@ Create `Sources/SonoraDSP/EqualizerChain.swift`:
 ```swift
 /// A cascade of biquad sections applied to an interleaved audio buffer.
 ///
-/// The chain owns one `Biquad` per band per channel. Band definitions come from
-/// the interface thread through `update(bands:)`; `process` runs on the
-/// real-time audio thread and touches only preallocated storage.
+/// Filter state lives in one flat buffer allocated once at construction and
+/// sized for the maximum band count. Nothing on the audio path touches Swift
+/// `Array` storage, so `process` and `applyCoefficients` allocate nothing, take
+/// no locks, and do no reference counting.
 ///
-/// This class is not thread safe by itself. The engine owns the synchronisation:
-/// `update(bands:)` is called only while the render loop is stopped, or through
-/// the parameter bridge that swaps whole snapshots.
+/// The thread split is deliberate. Coefficients are expensive to compute and are
+/// produced on the interface thread, either through `update(bands:)` or through
+/// the static `coefficients(for:sampleRate:)` helper. The audio thread only ever
+/// calls `applyCoefficients`, which copies finished floats.
+///
+/// ## Threading contract
+///
+/// This is a contract, not a suggestion. The chain has no internal
+/// synchronisation, and `@unchecked Sendable` asserts that callers honour the
+/// split below rather than providing any safety itself.
+///
+/// - `update(bands:)` is the setup path. Call it before the render callback
+///   starts, or while it is stopped. Never while audio is flowing.
+/// - `applyCoefficients` is the live path. Call it only from the render callback
+///   itself, with coefficients already resolved elsewhere. In Sonora the
+///   parameter bridge does that resolving on the interface thread and hands the
+///   finished floats across.
+///
+/// Calling `update(bands:)` while the render callback runs is a data race. A
+/// five float coefficient set has no atomic store, so the audio thread can read
+/// a torn mix of old and new values and land on an unstable pole pair, which is
+/// audible as a burst of noise rather than the click the split exists to avoid.
 public final class EqualizerChain: @unchecked Sendable {
+
+    /// Upper bound on bands, so storage is allocated once. The graphic
+    /// equalizer uses ten; the parametric mode in a later phase stays under this.
+    public static let maximumBandCount = 32
 
     public private(set) var bands: [EqualizerBand]
 
     private let sampleRate: Double
     private let channelCount: Int
 
-    /// Filter state, laid out as `[channel][band]`. Preallocated once so that
-    /// `process` never allocates.
-    private var filters: [[Biquad]]
+    /// `channelCount * maximumBandCount` filters, laid out channel-major.
+    private let filters: UnsafeMutableBufferPointer<Biquad>
+
+    /// How many of the per-channel slots are in use.
+    private var bandCount: Int
 
     public init(sampleRate: Double, channelCount: Int) {
+        let channels = max(channelCount, 1)
         self.sampleRate = sampleRate
-        self.channelCount = max(channelCount, 1)
-        self.bands = EqualizerBand.graphicDefaults
-        self.filters = Array(
-            repeating: Array(repeating: Biquad(), count: EqualizerBand.graphicDefaults.count),
-            count: max(channelCount, 1)
+        self.channelCount = channels
+        // Left empty on purpose: `update` below is the single source of truth
+        // for both, and setting them here would only make the coefficient work
+        // it does look like it had already happened.
+        self.bands = []
+        self.bandCount = 0
+
+        let storage = UnsafeMutableBufferPointer<Biquad>.allocate(
+            capacity: channels * Self.maximumBandCount
         )
+        storage.initialize(repeating: Biquad())
+        self.filters = storage
+
         update(bands: EqualizerBand.graphicDefaults)
+    }
+
+    deinit {
+        filters.deinitialize()
+        filters.deallocate()
     }
 
     /// Replaces the band definitions and recomputes coefficients.
     ///
-    /// Filter state is preserved when the band count is unchanged, so a slider
-    /// move does not click. A change in band count reallocates and resets.
+    /// Setup path only. See the threading contract on the type: call this before
+    /// the render callback starts, or while it is stopped, never while audio is
+    /// flowing. Live changes go through `applyCoefficients` instead.
+    ///
+    /// Filter state is left alone, which is what lets the chain be reconfigured
+    /// and restarted without a discontinuity.
     public func update(bands newBands: [EqualizerBand]) {
-        if newBands.count != bands.count {
-            filters = Array(
-                repeating: Array(repeating: Biquad(), count: newBands.count),
-                count: channelCount
-            )
-        }
-        bands = newBands
+        let clamped = Array(newBands.prefix(Self.maximumBandCount))
+        bands = clamped
+        bandCount = clamped.count
 
-        for channel in 0..<channelCount {
-            for index in newBands.indices {
-                let band = newBands[index]
-                filters[channel][index].coefficients = BiquadCoefficients(
-                    kind: band.kind,
-                    frequency: band.frequency,
-                    q: band.q,
-                    gainDecibels: band.gainDecibels,
-                    sampleRate: sampleRate
-                )
+        // Every channel gets the same coefficients, so the trigonometry runs
+        // once per band rather than once per band per channel.
+        for index in 0..<clamped.count {
+            let band = clamped[index]
+            let computed = BiquadCoefficients(
+                kind: band.kind,
+                frequency: band.frequency,
+                q: band.q,
+                gainDecibels: band.gainDecibels,
+                sampleRate: sampleRate
+            )
+            for channel in 0..<channelCount {
+                filters[channel * Self.maximumBandCount + index].coefficients = computed
             }
         }
     }
 
-    /// Filters an interleaved buffer in place.
+    /// Installs precomputed coefficients.
+    ///
+    /// Real-time safe: reads a caller-owned buffer and copies plain floats.
+    /// No allocation, no locks, no coefficient math. `bands` is deliberately not
+    /// updated, because it is interface-side bookkeeping.
+    public func applyCoefficients(_ source: UnsafePointer<BiquadCoefficients>, count: Int) {
+        // A negative count would make `0..<usable` trap, and trapping on the
+        // audio thread kills the render callback outright.
+        //
+        // Every channel below shares this one bound, which is also what makes a
+        // wrong bound detectable: the last channel's pass would run off the end
+        // of the whole allocation and trip the debug bounds check. Give each
+        // channel its own bound and that safety net disappears.
+        let usable = min(max(count, 0), Self.maximumBandCount)
+        bandCount = usable
+
+        for channel in 0..<channelCount {
+            let base = channel * Self.maximumBandCount
+            for index in 0..<usable {
+                filters[base + index].coefficients = source[index]
+            }
+        }
+    }
+
+    /// Filters an interleaved buffer in place. Real-time safe.
     ///
     /// - Parameters:
     ///   - buffer: interleaved samples, `frameCount * channelCount` of them.
     ///   - frameCount: number of frames, not samples.
     public func process(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int) {
-        let bandCount = bands.count
-        guard bandCount > 0 else { return }
+        guard bandCount > 0, frameCount > 0 else { return }
 
         for channel in 0..<channelCount {
-            filters[channel].withUnsafeMutableBufferPointer { channelFilters in
-                for frame in 0..<frameCount {
-                    let offset = frame * channelCount + channel
-                    var sample = buffer[offset]
-                    for index in 0..<bandCount {
-                        sample = channelFilters[index].process(sample)
-                    }
-                    buffer[offset] = sample
+            let base = channel * Self.maximumBandCount
+            for frame in 0..<frameCount {
+                let offset = frame * channelCount + channel
+                var sample = buffer[offset]
+                for index in 0..<bandCount {
+                    sample = filters[base + index].process(sample)
                 }
+                buffer[offset] = sample
             }
         }
     }
 
     /// Clears every filter's memory. Call after a format change.
     public func reset() {
-        for channel in filters.indices {
-            for index in filters[channel].indices {
-                filters[channel][index].reset()
-            }
+        for index in 0..<(channelCount * Self.maximumBandCount) {
+            filters[index].reset()
         }
     }
 
-    /// The combined response of every band at one frequency, in decibels.
+    /// The combined response of the active bands at one frequency, in decibels.
     /// Used to draw the equalizer curve.
+    ///
+    /// Reads channel zero's slots, which start at offset zero, because every
+    /// channel always holds identical coefficients. If per-channel bands are
+    /// ever added, this has to take a channel argument.
     public func magnitudeDecibels(atFrequency frequency: Double) -> Float {
-        guard let channelFilters = filters.first else { return 0 }
-        return channelFilters.reduce(Float(0)) { total, filter in
-            total + filter.coefficients.magnitudeDecibels(
+        var total: Float = 0
+        for index in 0..<bandCount {
+            total += filters[index].coefficients.magnitudeDecibels(
                 atFrequency: frequency, sampleRate: sampleRate
+            )
+        }
+        return total
+    }
+
+    /// Computes coefficients for a band list without touching a chain.
+    /// This is how the parameter bridge does its work on the interface thread.
+    public static func coefficients(
+        for bands: [EqualizerBand],
+        sampleRate: Double
+    ) -> [BiquadCoefficients] {
+        bands.prefix(maximumBandCount).map { band in
+            BiquadCoefficients(
+                kind: band.kind,
+                frequency: band.frequency,
+                q: band.q,
+                gainDecibels: band.gainDecibels,
+                sampleRate: sampleRate
             )
         }
     }
@@ -986,7 +1219,7 @@ public final class EqualizerChain: @unchecked Sendable {
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `swift test --filter EqualizerChainTests`
-Expected: PASS, 7 tests.
+Expected: PASS, 10 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -1009,7 +1242,7 @@ git commit -m "feat: add ten band equalizer chain over interleaved buffers"
 - Consumes: `SmoothedValue`, `EqualizerBand`, `EqualizerChain`.
 - Produces:
   - `struct SoftLimiter` with `static let ceiling: Float` (0.966, which is -0.3 dBFS), `static let threshold: Float` (0.5), `func process(_ input: Float) -> Float`, `private(set) var isEngaged: Bool`, `mutating func clearEngagedFlag()`.
-  - `final class DSPChain` with `init(sampleRate: Double, channelCount: Int)`, `var preampDecibels: Double { get set }`, `var isBypassed: Bool { get set }`, `func update(bands: [EqualizerBand])`, `func process(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int)`, `func reset()`, `var limiterIsEngaged: Bool { get }`, `func magnitudeDecibels(atFrequency: Double) -> Float`.
+  - `final class DSPChain` with `init(sampleRate: Double, channelCount: Int)`, `var preampDecibels: Double { get set }` (computed over the ramp target), `var isBypassed: Bool { get set }`, `func update(bands: [EqualizerBand])` (interface thread), `func applyResolved(isBypassed: Bool, preampGain: Float, coefficients: UnsafePointer<BiquadCoefficients>, count: Int)` (real-time thread), `func process(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int)`, `func reset()`, `var limiterIsEngaged: Bool { get }`, `func magnitudeDecibels(atFrequency: Double) -> Float`.
 - Used by Task 13 (render loop).
 
 - [ ] **Step 1: Write the failing limiter test**
@@ -1121,6 +1354,14 @@ public struct SoftLimiter: Sendable {
 
     @inline(__always)
     public mutating func process(_ input: Float) -> Float {
+        // This is the last stage before the samples reach the device, so a NaN
+        // arriving from a broken stage upstream would go straight out. Infinity
+        // needs no special case: the shaping below saturates it to the ceiling.
+        guard !input.isNaN else {
+            isEngaged = true
+            return 0
+        }
+
         let magnitude = abs(input)
         guard magnitude > Self.threshold else { return input }
 
@@ -1254,6 +1495,38 @@ struct DSPChainTests {
         #expect(buffer[126] > buffer[0])
     }
 
+    @Test("applyResolved installs bypass, preamp and coefficients together")
+    func applyResolved() {
+        let chain = DSPChain(sampleRate: sampleRate, channelCount: 2)
+
+        var bands = EqualizerBand.graphicDefaults
+        bands[4].gainDecibels = 4  // 500 Hz
+        let computed = EqualizerChain.coefficients(for: bands, sampleRate: sampleRate)
+
+        computed.withUnsafeBufferPointer { pointer in
+            chain.applyResolved(
+                isBypassed: false,
+                preampGain: 0.5,
+                coefficients: pointer.baseAddress!,
+                count: computed.count
+            )
+        }
+
+        #expect(chain.isBypassed == false)
+        #expect(abs(chain.preampDecibels - (-6.020_6)) < 0.01)
+        #expect(abs(chain.magnitudeDecibels(atFrequency: 500) - 4) < 0.3)
+    }
+
+    @Test("preampDecibels round trips through the ramp target")
+    func preampDecibelsRoundTrip() {
+        let chain = DSPChain(sampleRate: sampleRate, channelCount: 2)
+
+        for value in [-12.0, -3.0, 0.0, 6.0, 12.0] {
+            chain.preampDecibels = value
+            #expect(abs(chain.preampDecibels - value) < 0.001)
+        }
+    }
+
     @Test("processing a mono buffer works")
     func monoChannelCount() {
         let chain = DSPChain(sampleRate: sampleRate, channelCount: 1)
@@ -1278,6 +1551,7 @@ Expected: FAIL, compiler error `cannot find 'DSPChain' in scope`.
 Create `Sources/SonoraDSP/DSPChain.swift`:
 
 ```swift
+import Atomics
 import Foundation
 
 /// The complete signal path: preamp, equalizer, limiter.
@@ -1292,8 +1566,17 @@ public final class DSPChain: @unchecked Sendable {
 
     /// Digital gain applied before the equalizer, in decibels. This is Sonora's
     /// own gain and is independent of the system output volume.
-    public var preampDecibels: Double = 0 {
-        didSet { preampGain.target = Float(pow(10, preampDecibels / 20)) }
+    ///
+    /// Backed by the ramp's target rather than a separate stored property, so
+    /// that a real-time `applyResolved` and an interface-side assignment can
+    /// never disagree about the current value.
+    ///
+    /// The getter floors the linear gain at 1e-6 because `log10(0)` is negative
+    /// infinity. A true mute therefore reads back as -120 dB rather than as a
+    /// value no interface can render.
+    public var preampDecibels: Double {
+        get { 20 * log10(Double(max(preampRamp.target, 1e-6))) }
+        set { preampRamp.target = Float(pow(10, newValue / 20)) }
     }
 
     /// When true, `process` returns the buffer untouched.
@@ -1301,24 +1584,49 @@ public final class DSPChain: @unchecked Sendable {
 
     private let equalizer: EqualizerChain
     private let channelCount: Int
-    private var preampGain: SmoothedValue
+    private var preampRamp: SmoothedValue
     private var limiters: [SoftLimiter]
+    private let limiterEngaged = ManagedAtomic<Bool>(false)
 
     public init(sampleRate: Double, channelCount: Int) {
         self.channelCount = max(channelCount, 1)
         self.equalizer = EqualizerChain(sampleRate: sampleRate, channelCount: channelCount)
-        self.preampGain = SmoothedValue(value: 1, sampleRate: sampleRate)
+        self.preampRamp = SmoothedValue(value: 1, sampleRate: sampleRate)
         self.limiters = Array(repeating: SoftLimiter(), count: max(channelCount, 1))
     }
 
-    /// Replaces the equalizer bands.
+    /// Replaces the equalizer bands, recomputing coefficients.
+    /// Interface thread only.
     public func update(bands: [EqualizerBand]) {
         equalizer.update(bands: bands)
     }
 
-    /// True if the limiter shaped anything since the last buffer.
+    /// Installs a complete parameter set that was resolved elsewhere.
+    ///
+    /// Real-time safe: assigns a bool, retargets a ramp, and copies finished
+    /// coefficients. No coefficient math, no allocation, no locks.
+    public func applyResolved(
+        isBypassed: Bool,
+        preampGain: Float,
+        coefficients: UnsafePointer<BiquadCoefficients>,
+        count: Int
+    ) {
+        self.isBypassed = isBypassed
+        preampRamp.target = preampGain
+        equalizer.applyCoefficients(coefficients, count: count)
+    }
+
+    /// Whether the limiter shaped anything in the most recently processed
+    /// buffer.
+    ///
+    /// The audio thread writes this once per buffer and the interface thread
+    /// reads it to light the overload indicator, so it is genuinely cross
+    /// thread. A plain `Bool` would be a data race, and a reader could catch a
+    /// buffer part way through and see some channels already re-processed while
+    /// others still hold the value from the start of the same buffer. One
+    /// atomic, written once per buffer, gives a coherent snapshot instead.
     public var limiterIsEngaged: Bool {
-        limiters.contains { $0.isEngaged }
+        limiterEngaged.load(ordering: .acquiring)
     }
 
     /// The equalizer curve at one frequency, in decibels. Excludes the preamp.
@@ -1328,15 +1636,16 @@ public final class DSPChain: @unchecked Sendable {
 
     /// Runs the chain over an interleaved buffer in place.
     public func process(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int) {
-        guard !isBypassed else { return }
-
-        for index in limiters.indices {
-            limiters[index].clearEngagedFlag()
+        guard !isBypassed else {
+            // Nothing is being shaped while bypassed, so the indicator must not
+            // stay lit from whatever the last processed buffer happened to do.
+            limiterEngaged.store(false, ordering: .releasing)
+            return
         }
 
         // Preamp, one ramped gain value per frame shared across channels.
         for frame in 0..<frameCount {
-            let gain = preampGain.nextValue()
+            let gain = preampRamp.nextValue()
             for channel in 0..<channelCount {
                 buffer[frame * channelCount + channel] *= gain
             }
@@ -1344,23 +1653,39 @@ public final class DSPChain: @unchecked Sendable {
 
         equalizer.process(buffer, frameCount: frameCount)
 
+        // One unsafe buffer pass for the whole limiter stage. Subscripting
+        // `limiters` directly would go through Array's uniqueness check on
+        // every access, which is exactly the reference counting the audio
+        // thread must not do.
+        var engaged = false
         limiters.withUnsafeMutableBufferPointer { limiterPointer in
+            for index in limiterPointer.indices {
+                limiterPointer[index].clearEngagedFlag()
+            }
+
             for frame in 0..<frameCount {
                 for channel in 0..<channelCount {
                     let offset = frame * channelCount + channel
                     buffer[offset] = limiterPointer[channel].process(buffer[offset])
                 }
             }
+
+            for index in limiterPointer.indices where limiterPointer[index].isEngaged {
+                engaged = true
+            }
         }
+
+        limiterEngaged.store(engaged, ordering: .releasing)
     }
 
     /// Clears filter and ramp state. Call after a format change.
     public func reset() {
         equalizer.reset()
-        preampGain.snap(to: Float(pow(10, preampDecibels / 20)))
+        preampRamp.snap(to: preampRamp.target)
         for index in limiters.indices {
             limiters[index].clearEngagedFlag()
         }
+        limiterEngaged.store(false, ordering: .releasing)
     }
 }
 ```
@@ -1368,7 +1693,7 @@ public final class DSPChain: @unchecked Sendable {
 - [ ] **Step 8: Run the tests to verify they pass**
 
 Run: `swift test --filter DSPChainTests`
-Expected: PASS, 6 tests.
+Expected: PASS, 8 tests.
 
 - [ ] **Step 9: Commit**
 
@@ -1382,6 +1707,7 @@ git commit -m "feat: add soft limiter and complete preamp to limiter DSP chain"
 ### Task 6: Presets
 
 **Files:**
+- Modify: `Package.swift`
 - Create: `Sources/SonoraProfiles/Preset.swift`
 - Create: `Sources/SonoraProfiles/BuiltInPresets.swift`
 - Test: `Tests/SonoraProfilesTests/PresetTests.swift`
@@ -1390,7 +1716,25 @@ git commit -m "feat: add soft limiter and complete preamp to limiter DSP chain"
 - Consumes: `EqualizerBand` from Task 4.
 - Produces: `struct Preset: Codable, Equatable, Identifiable, Sendable` with `let id: String`, `var name: String`, `var preampDecibels: Double`, `var bands: [EqualizerBand]`, `let isBuiltIn: Bool`; `enum BuiltInPresets` with `static let all: [Preset]` and `static let flat: Preset`; `Preset.init(id:name:preampDecibels:gains:)` convenience taking ten gain values. Used by Task 7 (settings) and Task 14 (menu).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the target**
+
+`SonoraProfiles` has no target yet, because SwiftPM refuses to resolve a package
+with an empty target. Add it now, in the same task that gives it source files.
+
+Modify `Package.swift`, adding to `products`:
+
+```swift
+        .library(name: "SonoraProfiles", targets: ["SonoraProfiles"]),
+```
+
+and to `targets`:
+
+```swift
+        .target(name: "SonoraProfiles", dependencies: ["SonoraDSP"]),
+        .testTarget(name: "SonoraProfilesTests", dependencies: ["SonoraProfiles"]),
+```
+
+- [ ] **Step 2: Write the failing test**
 
 Create `Tests/SonoraProfilesTests/PresetTests.swift`:
 
@@ -1472,12 +1816,12 @@ struct PresetTests {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 3: Run it to verify it fails**
 
 Run: `swift test --filter PresetTests`
 Expected: FAIL, compiler error `cannot find 'BuiltInPresets' in scope`.
 
-- [ ] **Step 3: Write the preset model**
+- [ ] **Step 4: Write the preset model**
 
 Create `Sources/SonoraProfiles/Preset.swift`:
 
@@ -1535,7 +1879,7 @@ public struct Preset: Codable, Equatable, Identifiable, Sendable {
 }
 ```
 
-- [ ] **Step 4: Write the built-in presets**
+- [ ] **Step 5: Write the built-in presets**
 
 Create `Sources/SonoraProfiles/BuiltInPresets.swift`:
 
@@ -1613,15 +1957,22 @@ public enum BuiltInPresets {
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `swift test --filter PresetTests`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Verify the package resolves from a clean checkout**
+
+Run: `git stash -u && swift build 2>&1 | tail -3; git stash pop`
+Expected: the build succeeds against committed files only. If it fails with
+"Source files for target X should be located under...", a target is declared
+without sources. Never add a placeholder file to silence this.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add Sources/SonoraProfiles Tests/SonoraProfilesTests
+git add Package.swift Sources/SonoraProfiles Tests/SonoraProfilesTests
 git commit -m "feat: add preset model and built-in presets"
 ```
 
@@ -1630,6 +1981,7 @@ git commit -m "feat: add preset model and built-in presets"
 ### Task 7: Settings and the settings store
 
 **Files:**
+- Modify: `Package.swift`
 - Create: `Sources/SonoraPersistence/Settings.swift`
 - Create: `Sources/SonoraPersistence/SettingsStore.swift`
 - Test: `Tests/SonoraPersistenceTests/SettingsStoreTests.swift`
@@ -1641,7 +1993,22 @@ git commit -m "feat: add preset model and built-in presets"
   - `final class SettingsStore` with `init(directory: URL)`, `let fileURL: URL`, `func load() -> Settings`, `func save(_ settings: Settings) throws`, `private(set) var lastLoadFailure: LoadFailure?`, `enum LoadFailure: Equatable { case missing, unreadable, corrupt(backupURL: URL), futureVersion(Int) }`, `static func defaultDirectory() -> URL`.
 - Used by Task 14.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Declare the target**
+
+Modify `Package.swift`, adding to `products`:
+
+```swift
+        .library(name: "SonoraPersistence", targets: ["SonoraPersistence"]),
+```
+
+and to `targets`:
+
+```swift
+        .target(name: "SonoraPersistence", dependencies: ["SonoraProfiles", "SonoraDSP"]),
+        .testTarget(name: "SonoraPersistenceTests", dependencies: ["SonoraPersistence"]),
+```
+
+- [ ] **Step 2: Write the failing test**
 
 Create `Tests/SonoraPersistenceTests/SettingsStoreTests.swift`:
 
@@ -1752,12 +2119,12 @@ struct SettingsStoreTests {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 3: Run it to verify it fails**
 
 Run: `swift test --filter SettingsStoreTests`
 Expected: FAIL, compiler error `cannot find 'Settings' in scope`.
 
-- [ ] **Step 3: Write the settings model**
+- [ ] **Step 4: Write the settings model**
 
 Create `Sources/SonoraPersistence/Settings.swift`:
 
@@ -1800,12 +2167,13 @@ public struct Settings: Codable, Equatable, Sendable {
 }
 ```
 
-- [ ] **Step 4: Write the store**
+- [ ] **Step 5: Write the store**
 
 Create `Sources/SonoraPersistence/SettingsStore.swift`:
 
 ```swift
 import Foundation
+import SonoraProfiles
 
 /// Reads and writes `Settings` as JSON on disk.
 ///
@@ -1819,14 +2187,30 @@ public final class SettingsStore {
         case missing
         /// The file exists but could not be read from disk.
         case unreadable
-        /// The file could not be decoded and was moved aside.
-        case corrupt(backupURL: URL)
+        /// The file could not be decoded. `backupURL` is where it was moved,
+        /// or nil when it could not be moved at all, in which case the same
+        /// file will fail again on the next launch.
+        case corrupt(backupURL: URL?)
         /// The file was written by a newer version of Sonora.
         case futureVersion(Int)
+        /// The file came from an older schema and no longer decodes. Reported
+        /// separately from `corrupt` so an out of date file is never mistaken
+        /// for garbage and quarantined.
+        case staleVersion(Int)
     }
 
     public let fileURL: URL
     public private(set) var lastLoadFailure: LoadFailure?
+
+    /// User presets the last load dropped because they claimed to be built in
+    /// or reused a built-in identifier.
+    ///
+    /// Empty after a clean load. Kept separate from `lastLoadFailure` because
+    /// the load itself succeeded: something was cleaned up, nothing was lost to
+    /// an error. Without this the correction is invisible, and a preset that
+    /// some future bug mislabels would simply disappear on the next launch with
+    /// nothing to debug from.
+    public private(set) var lastDroppedPresets: [Preset] = []
 
     private let directory: URL
     private let fileManager = FileManager.default
@@ -1843,6 +2227,8 @@ public final class SettingsStore {
     }
 
     public func load() -> Settings {
+        lastDroppedPresets = []
+
         guard fileManager.fileExists(atPath: fileURL.path) else {
             lastLoadFailure = .missing
             return .defaults
@@ -1853,22 +2239,59 @@ public final class SettingsStore {
             return .defaults
         }
 
-        // Read the version before the full decode, so a newer file is reported as
-        // a version problem rather than as corruption.
-        if let envelope = try? JSONDecoder().decode(SchemaEnvelope.self, from: data),
-           envelope.schemaVersion > Settings.currentSchemaVersion {
-            lastLoadFailure = .futureVersion(envelope.schemaVersion)
+        // Read the version before the full decode, so a version problem is
+        // never reported as corruption.
+        let storedVersion = (try? JSONDecoder().decode(SchemaEnvelope.self, from: data))?
+            .schemaVersion
+
+        if let storedVersion, storedVersion > Settings.currentSchemaVersion {
+            lastLoadFailure = .futureVersion(storedVersion)
             return .defaults
         }
 
         do {
             let settings = try JSONDecoder().decode(Settings.self, from: data)
             lastLoadFailure = nil
-            return settings
+            return reconciled(settings)
         } catch {
+            if let storedVersion, storedVersion < Settings.currentSchemaVersion {
+                lastLoadFailure = .staleVersion(storedVersion)
+                return .defaults
+            }
             lastLoadFailure = .corrupt(backupURL: backUpCorruptFile())
             return .defaults
         }
+    }
+
+    /// Strips claims a settings file is not allowed to make.
+    ///
+    /// `Preset` is `Codable`, so a hand edited or corrupted file can present a
+    /// user preset that claims to be built in, or one that reuses a built-in
+    /// identifier. The interface refuses to edit or delete built-in presets, so
+    /// such an entry becomes a ghost the user cannot remove, and a duplicated
+    /// identifier makes every lookup ambiguous. This is the disk boundary, so
+    /// this is where those claims are dropped.
+    private func reconciled(_ settings: Settings) -> Settings {
+        let builtInIdentifiers = Set(BuiltInPresets.all.map(\.id))
+
+        // Each entry's fate is decided once, on its own. Deriving the dropped
+        // list afterwards by asking "did anything with this id survive" loses a
+        // dropped entry whenever it shares an id with a kept one, which is
+        // exactly the duplicated-identifier file this step exists to clean up.
+        var kept: [Preset] = []
+        var dropped: [Preset] = []
+        for preset in settings.userPresets {
+            if !preset.isBuiltIn && !builtInIdentifiers.contains(preset.id) {
+                kept.append(preset)
+            } else {
+                dropped.append(preset)
+            }
+        }
+
+        var result = settings
+        result.userPresets = kept
+        lastDroppedPresets = dropped
+        return result
     }
 
     public func save(_ settings: Settings) throws {
@@ -1882,14 +2305,24 @@ public final class SettingsStore {
         try encoder.encode(stored).write(to: fileURL, options: .atomic)
     }
 
-    /// Moves the unreadable file aside so the next launch starts clean while the
-    /// user keeps whatever was in it.
-    private func backUpCorruptFile() -> URL {
+    /// Moves the undecodable file aside so the next launch starts clean while
+    /// the user keeps whatever was in it.
+    ///
+    /// Returns nil when the move fails, for example on a read-only volume or a
+    /// full disk. Reporting that honestly matters: the alternative is naming a
+    /// backup file that was never written, while the original stays in place
+    /// and fails again on every launch with nothing to show for it.
+    private func backUpCorruptFile() -> URL? {
         let stamp = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
         let backupURL = directory.appendingPathComponent("settings-\(stamp).json.corrupt")
-        try? fileManager.moveItem(at: fileURL, to: backupURL)
-        return backupURL
+
+        do {
+            try fileManager.moveItem(at: fileURL, to: backupURL)
+            return backupURL
+        } catch {
+            return nil
+        }
     }
 
     private struct SchemaEnvelope: Decodable {
@@ -1898,20 +2331,20 @@ public final class SettingsStore {
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `swift test --filter SettingsStoreTests`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 6: Run the whole suite**
+- [ ] **Step 7: Run the whole suite**
 
 Run: `swift test`
-Expected: PASS, all suites, roughly 44 tests.
+Expected: PASS, all suites, roughly 55 tests.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add Sources/SonoraPersistence Tests/SonoraPersistenceTests
+git add Package.swift Sources/SonoraPersistence Tests/SonoraPersistenceTests
 git commit -m "feat: add versioned settings store with corrupt file recovery"
 ```
 
@@ -1945,12 +2378,14 @@ concurrency:
 jobs:
   test:
     name: Swift package tests
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned to the version the project is developed against. macos-15 was
+      # tried first and carries Swift 6.1, which cannot read this manifest.
       - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_26.app
+        run: sudo xcode-select -switch /Applications/Xcode_26.3.app
 
       - name: Show toolchain
         run: swift --version
@@ -1960,6 +2395,13 @@ jobs:
 
       - name: Test
         run: swift test --parallel
+
+      # EqualizerChain does unchecked pointer arithmetic over a flat filter
+      # buffer. An off-by-one there is silent memory corruption in release
+      # builds and cannot be caught behaviourally, so the suite also runs under
+      # AddressSanitizer.
+      - name: Test under AddressSanitizer
+        run: swift test --sanitize=address
 ```
 
 - [ ] **Step 2: Verify the workflow file parses**
@@ -1978,7 +2420,10 @@ git push
 - [ ] **Step 4: Confirm the run passes**
 
 Run: `gh run watch --exit-status`
-Expected: the `Swift package tests` job finishes green. If the runner has no Xcode 26, change the `Select Xcode` step to the newest version the runner image offers (`ls /Applications | grep Xcode`) and push the fix.
+Expected: every job finishes green, including the AddressSanitizer one. If the
+runner image no longer carries Xcode 26.3, pick the newest 26.x it does offer
+(`ls /Applications | grep Xcode`) and push the fix. Never lower
+`swift-tools-version` to make the build pass.
 
 ---
 
@@ -2962,14 +3407,27 @@ Report the latency figure and the checklist results before starting Task 13. If 
 - Consumes: `EqualizerBand`, `DSPChain`.
 - Produces:
   - `struct EngineParameters: Equatable, Sendable` with `var isBypassed: Bool`, `var preampDecibels: Double`, `var bands: [EqualizerBand]`, `static let defaults`.
-  - `final class ParameterBridge` with `init(initial: EngineParameters)`, `func publish(_ parameters: EngineParameters)` (interface thread), `func applyPendingChanges(to chain: DSPChain)` (real-time thread, allocation free), `var current: EngineParameters { get }`.
+  - `final class ParameterBridge` with `init(initial: EngineParameters, sampleRate: Double)`, `func publish(_ parameters: EngineParameters)` (interface thread), `func setSampleRate(_ sampleRate: Double)` (interface thread), `func applyPendingChanges(to chain: DSPChain)` (real-time thread, allocation free and lock free), `var current: EngineParameters { get }`.
 - Used by Task 14.
 
-**Design note:** the interface thread writes a whole parameter set into one of two slots and flips an atomic generation counter. The real-time thread reads the counter, and when it has changed, copies the values into the `DSPChain` it already owns. Band arrays are copied into a fixed-size inline buffer so the real-time side never touches Swift array storage.
+**Design note:** the interface thread resolves a parameter set into finished
+coefficients and plain floats, writes them into one of three preallocated slots,
+then publishes that slot by storing its index with releasing order. The audio
+thread loads the index with acquiring order and reads that slot. The writer never
+touches the slot it just published, and three slots mean a reader cannot be
+lapped by a second publish, because publishes are paced by user gestures while a
+read takes well under a microsecond.
 
-- [ ] **Step 1: Add swift-atomics to the package**
+The audio side therefore does one atomic load when nothing changed, and a copy of
+plain floats when something did. No coefficient math, no allocation, no lock.
 
-Modify `Package.swift`, adding the dependency and wiring it into `SonoraDSP`:
+- [ ] **Step 1: Confirm swift-atomics is already wired in**
+
+`SonoraDSP` gained this dependency earlier, when `DSPChain` needed an atomic for
+its overload indicator. Check `Package.swift` matches the manifest below and
+move on; do not add the dependency twice.
+
+Expected `Package.swift`:
 
 ```swift
 // swift-tools-version: 6.2
@@ -3031,7 +3489,7 @@ struct EngineParametersTests {
 
         parameters.apply(to: chain)
 
-        #expect(chain.preampDecibels == -4)
+        #expect(abs(chain.preampDecibels - (-4)) < 0.001)
         #expect(chain.isBypassed == true)
         #expect(abs(chain.magnitudeDecibels(atFrequency: 64) - 5) < 0.3)
     }
@@ -3113,59 +3571,139 @@ import Atomics
 import Foundation
 
 /// Carries parameter changes from the interface thread to the real-time audio
-/// thread without a lock.
+/// thread with no lock and no allocation on the audio side.
 ///
-/// How it works: the interface writes a complete `EngineParameters` value into a
-/// mailbox guarded by a generation counter, then bumps the counter. The audio
-/// thread compares the counter against the last generation it applied. When they
-/// differ it takes the value and pushes it into the chain.
+/// The expensive part of a parameter change is turning bands into biquad
+/// coefficients. That happens here, on the interface thread. What crosses to the
+/// audio thread is a bool, a float, and a block of finished coefficients.
 ///
-/// Coefficient recalculation is not free, so it happens only on the buffers
-/// where something actually changed. Every other buffer costs one atomic load.
+/// Handoff: three preallocated slots. `publish` fills a slot the audio thread is
+/// not reading, then stores that slot's index with releasing order.
+/// `applyPendingChanges` loads the index with acquiring order and reads that
+/// slot. Because the writer never touches the slot it last published, and
+/// publishes are paced by user gestures while a read takes well under a
+/// microsecond, a reader cannot be lapped.
 ///
-/// The mailbox is written under a lock on the interface side only. The audio
-/// thread never blocks: it uses `tryLock` and skips the update if the interface
-/// happens to be mid-write, picking it up on the next buffer a few milliseconds
-/// later. Missing one buffer's worth of a slider move is inaudible; blocking the
-/// audio thread is not.
+/// The lock in this class is taken by the interface thread only, to guard the
+/// writer against itself. The audio path never touches it.
 public final class ParameterBridge: @unchecked Sendable {
 
-    private let generation = ManagedAtomic<Int>(0)
-    private let appliedGeneration = ManagedAtomic<Int>(0)
-    private let mailboxLock = NSLock()
-    private var mailbox: EngineParameters
+    /// Three slots, so the writer always has one that is neither being read nor
+    /// the one it published last.
+    private static let slotCount = 3
 
-    public init(initial: EngineParameters = .defaults) {
-        self.mailbox = initial
+    /// The plain-data half of a resolved parameter set. Coefficients live in a
+    /// parallel buffer, indexed by slot.
+    private struct Slot {
+        var isBypassed = false
+        var preampGain: Float = 1
+        var bandCount = 0
+    }
+
+    private var sampleRate: Double
+    private let slots: UnsafeMutablePointer<Slot>
+    private let coefficients: UnsafeMutablePointer<BiquadCoefficients>
+
+    private let activeIndex = ManagedAtomic<Int>(0)
+    private let generation = ManagedAtomic<Int>(0)
+    private let appliedGeneration = ManagedAtomic<Int>(-1)
+
+    /// Interface thread only. Never taken by the audio thread.
+    private let writerLock = NSLock()
+    private var publishedParameters: EngineParameters
+    private var nextWriteIndex = 1
+
+    public init(initial: EngineParameters = .defaults, sampleRate: Double = 48_000) {
+        self.sampleRate = sampleRate
+        self.publishedParameters = initial
+
+        let capacity = Self.slotCount * EqualizerChain.maximumBandCount
+        slots = UnsafeMutablePointer<Slot>.allocate(capacity: Self.slotCount)
+        slots.initialize(repeating: Slot(), count: Self.slotCount)
+        coefficients = UnsafeMutablePointer<BiquadCoefficients>.allocate(capacity: capacity)
+        coefficients.initialize(repeating: .identity, count: capacity)
+
+        resolve(initial, into: 0)
+        activeIndex.store(0, ordering: .releasing)
+        generation.store(0, ordering: .releasing)
+    }
+
+    deinit {
+        slots.deinitialize(count: Self.slotCount)
+        slots.deallocate()
+        coefficients.deinitialize(count: Self.slotCount * EqualizerChain.maximumBandCount)
+        coefficients.deallocate()
     }
 
     /// The most recently published values. Interface thread.
     public var current: EngineParameters {
-        mailboxLock.lock()
-        defer { mailboxLock.unlock() }
-        return mailbox
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        return publishedParameters
     }
 
-    /// Publishes a new parameter set. Interface thread.
+    /// Publishes a new parameter set, resolving its coefficients here.
+    /// Interface thread.
     public func publish(_ parameters: EngineParameters) {
-        mailboxLock.lock()
-        mailbox = parameters
-        mailboxLock.unlock()
-        generation.wrappingIncrement(ordering: .releasing)
+        writerLock.lock()
+        publishedParameters = parameters
+        publishLocked(parameters)
+        writerLock.unlock()
+    }
+
+    /// Re-resolves the current parameters for a new sample rate and republishes.
+    /// Call when the audio format changes, before the render loop starts.
+    /// Interface thread.
+    public func setSampleRate(_ sampleRate: Double) {
+        writerLock.lock()
+        self.sampleRate = sampleRate
+        publishLocked(publishedParameters)
+        writerLock.unlock()
     }
 
     /// Applies pending changes to the chain. Real-time thread.
-    /// Returns without blocking if there is nothing new or the mailbox is busy.
+    /// One atomic load when nothing changed; a float copy when something did.
     public func applyPendingChanges(to chain: DSPChain) {
         let published = generation.load(ordering: .acquiring)
         guard published != appliedGeneration.load(ordering: .relaxed) else { return }
-        guard mailboxLock.try() else { return }
 
-        let parameters = mailbox
-        mailboxLock.unlock()
+        let index = activeIndex.load(ordering: .acquiring)
+        let slot = slots[index]
 
-        parameters.apply(to: chain)
+        chain.applyResolved(
+            isBypassed: slot.isBypassed,
+            preampGain: slot.preampGain,
+            coefficients: coefficients + index * EqualizerChain.maximumBandCount,
+            count: slot.bandCount
+        )
+
         appliedGeneration.store(published, ordering: .relaxed)
+    }
+
+    /// Writes the next slot and publishes it. Caller holds `writerLock`.
+    private func publishLocked(_ parameters: EngineParameters) {
+        let target = nextWriteIndex
+        resolve(parameters, into: target)
+        activeIndex.store(target, ordering: .releasing)
+        generation.wrappingIncrement(ordering: .releasing)
+        nextWriteIndex = (target + 1) % Self.slotCount
+    }
+
+    /// Turns bands into coefficients and fills one slot. Interface thread.
+    private func resolve(_ parameters: EngineParameters, into index: Int) {
+        let computed = EqualizerChain.coefficients(
+            for: parameters.bands, sampleRate: sampleRate
+        )
+        let base = coefficients + index * EqualizerChain.maximumBandCount
+        for offset in 0..<computed.count {
+            base[offset] = computed[offset]
+        }
+
+        slots[index] = Slot(
+            isBypassed: parameters.isBypassed,
+            preampGain: Float(pow(10, parameters.preampDecibels / 20)),
+            bandCount: computed.count
+        )
     }
 }
 ```
@@ -3184,7 +3722,7 @@ struct ParameterBridgeTests {
 
     @Test("a published change reaches the chain")
     func publishReachesChain() {
-        let bridge = ParameterBridge()
+        let bridge = ParameterBridge(sampleRate: 48_000)
         let chain = DSPChain(sampleRate: 48_000, channelCount: 2)
 
         var parameters = EngineParameters.defaults
@@ -3192,12 +3730,42 @@ struct ParameterBridgeTests {
         bridge.publish(parameters)
         bridge.applyPendingChanges(to: chain)
 
-        #expect(chain.preampDecibels == -5)
+        #expect(abs(chain.preampDecibels - (-5)) < 0.001)
+    }
+
+    @Test("published band changes arrive as working coefficients")
+    func publishReachesCoefficients() {
+        let bridge = ParameterBridge(sampleRate: 48_000)
+        let chain = DSPChain(sampleRate: 48_000, channelCount: 2)
+
+        var parameters = EngineParameters.defaults
+        parameters.bands[2].gainDecibels = -8  // 125 Hz
+        bridge.publish(parameters)
+        bridge.applyPendingChanges(to: chain)
+
+        #expect(abs(chain.magnitudeDecibels(atFrequency: 125) + 8) < 0.3)
+    }
+
+    @Test("setSampleRate recomputes coefficients for the new rate")
+    func sampleRateChangeRepublishes() {
+        let bridge = ParameterBridge(sampleRate: 48_000)
+        let chain = DSPChain(sampleRate: 96_000, channelCount: 2)
+
+        var parameters = EngineParameters.defaults
+        parameters.bands[8].gainDecibels = 9  // 8 kHz
+        bridge.publish(parameters)
+
+        bridge.setSampleRate(96_000)
+        bridge.applyPendingChanges(to: chain)
+
+        // The chain reports its curve at 96 kHz, so the coefficients must have
+        // been built for 96 kHz too, or the peak lands at the wrong frequency.
+        #expect(abs(chain.magnitudeDecibels(atFrequency: 8_000) - 9) < 0.3)
     }
 
     @Test("current reflects the last published value")
     func currentReflectsPublish() {
-        let bridge = ParameterBridge()
+        let bridge = ParameterBridge(sampleRate: 48_000)
 
         var parameters = EngineParameters.defaults
         parameters.isBypassed = true
@@ -3208,7 +3776,7 @@ struct ParameterBridgeTests {
 
     @Test("applying twice without a new publish is a no-op")
     func appliesOnlyOnce() {
-        let bridge = ParameterBridge()
+        let bridge = ParameterBridge(sampleRate: 48_000)
         let chain = DSPChain(sampleRate: 48_000, channelCount: 2)
 
         var parameters = EngineParameters.defaults
@@ -3226,7 +3794,7 @@ struct ParameterBridgeTests {
 
     @Test("only the newest of several publishes is applied")
     func coalescesPublishes() {
-        let bridge = ParameterBridge()
+        let bridge = ParameterBridge(sampleRate: 48_000)
         let chain = DSPChain(sampleRate: 48_000, channelCount: 2)
 
         for value in [1.0, 2.0, 3.0] {
@@ -3236,12 +3804,12 @@ struct ParameterBridgeTests {
         }
         bridge.applyPendingChanges(to: chain)
 
-        #expect(chain.preampDecibels == 3)
+        #expect(abs(chain.preampDecibels - 3) < 0.001)
     }
 
     @Test("concurrent publishing never loses the final value")
     func concurrentPublishing() async {
-        let bridge = ParameterBridge()
+        let bridge = ParameterBridge(sampleRate: 48_000)
         let chain = DSPChain(sampleRate: 48_000, channelCount: 2)
 
         await withTaskGroup(of: Void.self) { group in
@@ -3259,10 +3827,11 @@ struct ParameterBridgeTests {
             }
         }
 
-        // Whatever landed last must be a value that was actually published.
+        // Whatever landed last must be a value that was actually published, and
+        // the chain must agree with what the bridge reports as current.
         bridge.applyPendingChanges(to: chain)
-        #expect((1...200).contains(Int(chain.preampDecibels)))
-        #expect(chain.preampDecibels == bridge.current.preampDecibels)
+        #expect((1...200).contains(Int(chain.preampDecibels.rounded())))
+        #expect(abs(chain.preampDecibels - bridge.current.preampDecibels) < 0.001)
     }
 }
 ```
@@ -3270,7 +3839,7 @@ struct ParameterBridgeTests {
 - [ ] **Step 8: Run the tests and the full suite**
 
 Run: `swift test`
-Expected: PASS, all suites, roughly 52 tests.
+Expected: PASS, all suites, roughly 65 tests.
 
 - [ ] **Step 9: Build the app to confirm the package change did not break it**
 
@@ -3475,7 +4044,9 @@ final class AudioEngineController {
                 sampleRate: format.mSampleRate,
                 channelCount: Int(format.mChannelsPerFrame)
             )
-            bridge.current.apply(to: chain)
+            // Resolve coefficients for the real format before any audio flows.
+            // This also republishes, so the first buffer picks the values up.
+            bridge.setSampleRate(format.mSampleRate)
             self.chain = chain
 
             let bridge = self.bridge

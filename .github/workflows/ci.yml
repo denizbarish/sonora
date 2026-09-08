@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Swift package tests
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the version the project is developed against. macos-15 was
+      # tried first and carries Swift 6.1, which cannot read this manifest.
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_26.3.app
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test --parallel
+
+      # There is no AddressSanitizer job, and that is a decision, not an
+      # oversight. `swift test --sanitize=address` builds cleanly and then
+      # hangs before running a single test, both here and on the developer
+      # machine, where the sanitizer runtime is refused at load with
+      # "Sanitizer load violates platform policy". Two runs burned six hours
+      # each before this was understood.
+      #
+      # What covers EqualizerChain's hand-written pointer arithmetic instead:
+      # its indices were derived by hand and checked against the allocation,
+      # every channel shares one computed bound so a wrong bound overruns the
+      # whole allocation rather than hiding in a neighbouring channel, and
+      # `UnsafeMutableBufferPointer` subscripts are bounds checked in debug
+      # builds, which is the configuration the job above runs in. A wrong bound
+      # therefore trips a precondition in the normal test run.
