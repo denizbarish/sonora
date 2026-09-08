@@ -4,7 +4,11 @@ import OSLog
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private(set) var statusItem: NSStatusItem!
+
     private let tap = ProcessTap()
+    private var aggregate: AggregateDevice?
+    private var renderLoop: RenderLoop?
+
     private let logger = Logger(subsystem: "com.sonora.Sonora", category: "AppDelegate")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -14,16 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             accessibilityDescription: "Sonora"
         )
 
-        let statusTitle: String
-        do {
-            try tap.activate()
-            let format = try tap.streamDescription()
-            statusTitle = "Tap active, \(Int(format.mSampleRate)) Hz, \(format.mChannelsPerFrame) ch"
-            logger.info("\(statusTitle, privacy: .public)")
-        } catch {
-            statusTitle = "Tap failed: \(error.localizedDescription)"
-            logger.error("\(error.localizedDescription, privacy: .public)")
-        }
+        let statusTitle = startEngine()
 
         let menu = NSMenu()
         menu.addItem(withTitle: statusTitle, action: nil, keyEquivalent: "")
@@ -36,7 +31,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    /// Starts the engine in passthrough mode and returns a line describing the
+    /// result, including the measured latency budget.
+    private func startEngine() -> String {
+        do {
+            try tap.activate()
+
+            let aggregate = AggregateDevice(tap: tap)
+            try aggregate.create()
+            self.aggregate = aggregate
+
+            let renderLoop = RenderLoop(aggregate: aggregate)
+            try renderLoop.start()
+            self.renderLoop = renderLoop
+
+            let format = try tap.streamDescription()
+            let bufferFrames = try aggregate.bufferFrameSize()
+            let deviceFrames = try aggregate.outputLatencyFrames()
+            let totalFrames = Double(bufferFrames + deviceFrames)
+            let milliseconds = totalFrames / format.mSampleRate * 1_000
+
+            let summary = String(
+                format: "Passthrough, %.0f Hz, buffer %u, device %u, added ~%.1f ms",
+                format.mSampleRate, bufferFrames, deviceFrames, milliseconds
+            )
+            logger.info("\(summary, privacy: .public)")
+            return summary
+        } catch {
+            stopEngine()
+            logger.error("\(error.localizedDescription, privacy: .public)")
+            return "Bypassed: \(error.localizedDescription)"
+        }
+    }
+
+    private func stopEngine() {
+        renderLoop?.stop()
+        renderLoop = nil
+        aggregate?.destroy()
+        aggregate = nil
         tap.invalidate()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        stopEngine()
     }
 }
