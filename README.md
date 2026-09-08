@@ -46,7 +46,15 @@ Building from source additionally needs Xcode 26 or later and a signing identity
 
 ## Design
 
-The full design document lives in [`docs/superpowers/specs/2026-09-07-sonora-design.md`](docs/superpowers/specs/2026-09-07-sonora-design.md). It covers the engine architecture, the Core Audio pitfalls that shaped it, module boundaries, DSP design, error handling and the test strategy.
+The reasoning lives in the source. Every non-obvious decision, and there are
+several, carries a doc comment explaining what it protects against: read
+`EqualizerChain` for the threading contract between the setup thread and the
+render callback, and `Biquad` for why filter state is flushed when it goes
+subnormal or non-finite.
+
+The original design document is written in Turkish, the author's working
+language, and is kept under `docs/` for the record rather than as contributor
+documentation.
 
 ## License
 
