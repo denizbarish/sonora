@@ -45,3 +45,25 @@ cannot cover at all, rather than as a rescue for latency.
 
 Two things this run deliberately did not answer, both belonging to Task 14:
 output device changes, and CPU under sustained load.
+
+## Task 14 verification
+
+Run by hand on the machine described above, 2026-09-09.
+
+| Check | Result |
+|---|---|
+| Menu shows Running | Pass |
+| Preset change audible | Pass |
+| Preset switching clean, no clicks | Pass |
+| Bypass toggles correctly | Not tested separately |
+| Settings survive relaunch | Not tested |
+| Headphone plug survives | Not tested |
+| Bluetooth switch survives | Not tested |
+| `kill -9` restores audio | Pass, verified during the latency gate above |
+| No distortion on Loudness at full volume | Not tested |
+| CPU use | Not measured |
+
+The device change checks are the ones still open, and they are the reason the
+device watcher exists: an aggregate device built around a device that has gone
+away stops passing audio with no error at all. Until they are run, that path is
+written but unproven.
