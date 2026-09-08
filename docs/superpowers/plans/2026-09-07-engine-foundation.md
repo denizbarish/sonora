@@ -3242,7 +3242,7 @@ final class RenderLoop {
     }
 
     func stop() {
-        guard let procID, aggregate.isCreated else {
+        guard let procID = ioProcID, aggregate.isCreated else {
             isRunning = false
             return
         }
