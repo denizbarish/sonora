@@ -3411,52 +3411,23 @@ Report the latency figure and the checklist results before starting Task 13. If 
 - Used by Task 14.
 
 **Design note:** the interface thread resolves a parameter set into finished
-coefficients and plain floats, writes them into one of three preallocated slots,
-then publishes that slot by storing its index with releasing order. The audio
-thread loads the index with acquiring order and reads that slot. The writer never
-touches the slot it just published, and three slots mean a reader cannot be
-lapped by a second publish, because publishes are paced by user gestures while a
-read takes well under a microsecond.
+coefficients and plain floats, writes them into one payload, and guards that
+payload with a sequence counter. The writer makes the counter odd before
+touching anything and even again when finished. The render thread reads the
+counter, copies the payload into its own scratch buffer, then reads the counter
+again: if it changed or was odd, the copy may be torn, so the render thread
+discards it and keeps the parameters it already had. One buffer of staleness is
+inaudible; a torn coefficient set is a burst of noise.
 
-The audio side therefore does one atomic load when nothing changed, and a copy of
-plain floats when something did. No coefficient math, no allocation, no lock.
+This replaces a rotating three-slot scheme that was not actually safe, only
+unlikely to fail. It guaranteed just that the writer avoided the slot it had
+published last, so a second publish could overwrite the slot a reader was still
+copying. A slider drag publishes every 8 to 16 ms against buffers of 5 to 10 ms,
+so that window is ordinary rather than exotic.
 
-- [ ] **Step 1: Confirm swift-atomics is already wired in**
-
-`SonoraDSP` gained this dependency earlier, when `DSPChain` needed an atomic for
-its overload indicator. Check `Package.swift` matches the manifest below and
-move on; do not add the dependency twice.
-
-Expected `Package.swift`:
-
-```swift
-// swift-tools-version: 6.2
-import PackageDescription
-
-let package = Package(
-    name: "SonoraCore",
-    platforms: [.macOS(.v14)],
-    products: [
-        .library(name: "SonoraDSP", targets: ["SonoraDSP"]),
-        .library(name: "SonoraProfiles", targets: ["SonoraProfiles"]),
-        .library(name: "SonoraPersistence", targets: ["SonoraPersistence"]),
-    ],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-atomics.git", from: "1.3.1"),
-    ],
-    targets: [
-        .target(
-            name: "SonoraDSP",
-            dependencies: [.product(name: "Atomics", package: "swift-atomics")]
-        ),
-        .target(name: "SonoraProfiles", dependencies: ["SonoraDSP"]),
-        .target(name: "SonoraPersistence", dependencies: ["SonoraProfiles"]),
-        .testTarget(name: "SonoraDSPTests", dependencies: ["SonoraDSP"]),
-        .testTarget(name: "SonoraProfilesTests", dependencies: ["SonoraProfiles"]),
-        .testTarget(name: "SonoraPersistenceTests", dependencies: ["SonoraPersistence"]),
-    ]
-)
-```
+The audio side therefore does one atomic load when nothing changed, and a copy
+of plain floats plus a second atomic load when something did. No coefficient
+math, no allocation, no lock.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -3577,62 +3548,68 @@ import Foundation
 /// coefficients. That happens here, on the interface thread. What crosses to the
 /// audio thread is a bool, a float, and a block of finished coefficients.
 ///
-/// Handoff: three preallocated slots. `publish` fills a slot the audio thread is
-/// not reading, then stores that slot's index with releasing order.
-/// `applyPendingChanges` loads the index with acquiring order and reads that
-/// slot. Because the writer never touches the slot it last published, and
-/// publishes are paced by user gestures while a read takes well under a
-/// microsecond, a reader cannot be lapped.
+/// Handoff is a seqlock. The writer makes `sequence` odd, writes the payload,
+/// then makes it even again. The reader loads `sequence`, copies the payload
+/// into its own scratch buffer, and loads `sequence` again: if the two loads
+/// disagree, or the first was odd, a write overlapped the copy, so the reader
+/// throws its copy away and leaves the chain on the parameters it already had.
+/// The next buffer picks the change up a few milliseconds later, which nobody
+/// can hear. Committing a half-written coefficient set, on the other hand, means
+/// an unstable pole pair and a burst of noise.
 ///
 /// The lock in this class is taken by the interface thread only, to guard the
-/// writer against itself. The audio path never touches it.
+/// writer against itself. The audio path never touches it, and never blocks.
 public final class ParameterBridge: @unchecked Sendable {
 
-    /// Three slots, so the writer always has one that is neither being read nor
-    /// the one it published last.
-    private static let slotCount = 3
-
     /// The plain-data half of a resolved parameter set. Coefficients live in a
-    /// parallel buffer, indexed by slot.
-    private struct Slot {
+    /// parallel buffer.
+    private struct Payload {
         var isBypassed = false
         var preampGain: Float = 1
         var bandCount = 0
     }
 
     private var sampleRate: Double
-    private let slots: UnsafeMutablePointer<Slot>
+
+    /// Even means settled, odd means a write is in flight.
+    private let sequence = ManagedAtomic<Int>(0)
+
+    private let payload: UnsafeMutablePointer<Payload>
     private let coefficients: UnsafeMutablePointer<BiquadCoefficients>
 
-    private let activeIndex = ManagedAtomic<Int>(0)
-    private let generation = ManagedAtomic<Int>(0)
-    private let appliedGeneration = ManagedAtomic<Int>(-1)
+    /// Reader-side scratch. Only the render thread touches it, which is what
+    /// lets the reader validate a copy before handing it to the chain.
+    private let scratch: UnsafeMutablePointer<BiquadCoefficients>
+
+    /// Render thread only, so a plain stored property is enough.
+    private var appliedSequence = -1
 
     /// Interface thread only. Never taken by the audio thread.
     private let writerLock = NSLock()
     private var publishedParameters: EngineParameters
-    private var nextWriteIndex = 1
 
     public init(initial: EngineParameters = .defaults, sampleRate: Double = 48_000) {
         self.sampleRate = sampleRate
         self.publishedParameters = initial
 
-        let capacity = Self.slotCount * EqualizerChain.maximumBandCount
-        slots = UnsafeMutablePointer<Slot>.allocate(capacity: Self.slotCount)
-        slots.initialize(repeating: Slot(), count: Self.slotCount)
+        let capacity = EqualizerChain.maximumBandCount
+        payload = UnsafeMutablePointer<Payload>.allocate(capacity: 1)
+        payload.initialize(to: Payload())
         coefficients = UnsafeMutablePointer<BiquadCoefficients>.allocate(capacity: capacity)
         coefficients.initialize(repeating: .identity, count: capacity)
+        scratch = UnsafeMutablePointer<BiquadCoefficients>.allocate(capacity: capacity)
+        scratch.initialize(repeating: .identity, count: capacity)
 
-        resolve(initial, into: 0)
-        activeIndex.store(0, ordering: .releasing)
-        generation.store(0, ordering: .releasing)
+        writeLocked(initial)
     }
 
     deinit {
-        slots.deinitialize(count: Self.slotCount)
-        slots.deallocate()
-        coefficients.deinitialize(count: Self.slotCount * EqualizerChain.maximumBandCount)
+        payload.deinitialize(count: 1)
+        payload.deallocate()
+        coefficients.deinitialize(count: EqualizerChain.maximumBandCount)
         coefficients.deallocate()
+        scratch.deinitialize(count: EqualizerChain.maximumBandCount)
+        scratch.deallocate()
     }
 
     /// The most recently published values. Interface thread.
@@ -3647,7 +3624,7 @@ public final class ParameterBridge: @unchecked Sendable {
     public func publish(_ parameters: EngineParameters) {
         writerLock.lock()
         publishedParameters = parameters
-        publishLocked(parameters)
+        writeLocked(parameters)
         writerLock.unlock()
     }
 
@@ -3657,53 +3634,59 @@ public final class ParameterBridge: @unchecked Sendable {
     public func setSampleRate(_ sampleRate: Double) {
         writerLock.lock()
         self.sampleRate = sampleRate
-        publishLocked(publishedParameters)
+        writeLocked(publishedParameters)
         writerLock.unlock()
     }
 
     /// Applies pending changes to the chain. Real-time thread.
-    /// One atomic load when nothing changed; a float copy when something did.
+    ///
+    /// Costs one atomic load when nothing changed. When something did, copies
+    /// the coefficients into scratch, validates, and only then commits.
     public func applyPendingChanges(to chain: DSPChain) {
-        let published = generation.load(ordering: .acquiring)
-        guard published != appliedGeneration.load(ordering: .relaxed) else { return }
+        let start = sequence.load(ordering: .acquiring)
 
-        let index = activeIndex.load(ordering: .acquiring)
-        let slot = slots[index]
+        // Odd means the writer is mid-update. Equal means nothing new.
+        guard start % 2 == 0, start != appliedSequence else { return }
+
+        let snapshot = payload.pointee
+        let count = min(max(snapshot.bandCount, 0), EqualizerChain.maximumBandCount)
+        for index in 0..<count {
+            scratch[index] = coefficients[index]
+        }
+
+        // If the counter moved, the copy above may mix old and new coefficients.
+        // Dropping it costs one buffer of staleness; committing it costs an
+        // unstable filter.
+        guard sequence.load(ordering: .acquiring) == start else { return }
 
         chain.applyResolved(
-            isBypassed: slot.isBypassed,
-            preampGain: slot.preampGain,
-            coefficients: coefficients + index * EqualizerChain.maximumBandCount,
-            count: slot.bandCount
+            isBypassed: snapshot.isBypassed,
+            preampGain: snapshot.preampGain,
+            coefficients: scratch,
+            count: count
         )
-
-        appliedGeneration.store(published, ordering: .relaxed)
+        appliedSequence = start
     }
 
-    /// Writes the next slot and publishes it. Caller holds `writerLock`.
-    private func publishLocked(_ parameters: EngineParameters) {
-        let target = nextWriteIndex
-        resolve(parameters, into: target)
-        activeIndex.store(target, ordering: .releasing)
-        generation.wrappingIncrement(ordering: .releasing)
-        nextWriteIndex = (target + 1) % Self.slotCount
-    }
-
-    /// Turns bands into coefficients and fills one slot. Interface thread.
-    private func resolve(_ parameters: EngineParameters, into index: Int) {
+    /// Writes the payload between an odd and an even sequence value.
+    /// Caller holds `writerLock`.
+    private func writeLocked(_ parameters: EngineParameters) {
         let computed = EqualizerChain.coefficients(
             for: parameters.bands, sampleRate: sampleRate
         )
-        let base = coefficients + index * EqualizerChain.maximumBandCount
-        for offset in 0..<computed.count {
-            base[offset] = computed[offset]
-        }
 
-        slots[index] = Slot(
+        sequence.wrappingIncrement(ordering: .acquiringAndReleasing)
+
+        for offset in 0..<computed.count {
+            coefficients[offset] = computed[offset]
+        }
+        payload.pointee = Payload(
             isBypassed: parameters.isBypassed,
             preampGain: Float(pow(10, parameters.preampDecibels / 20)),
             bandCount: computed.count
         )
+
+        sequence.wrappingIncrement(ordering: .releasing)
     }
 }
 ```
@@ -3807,6 +3790,56 @@ struct ParameterBridgeTests {
         #expect(abs(chain.preampDecibels - 3) < 0.001)
     }
 
+    @Test("a concurrent publish never leaves the chain with a mixed set")
+    func neverCommitsATornSet() async {
+        let bridge = ParameterBridge(sampleRate: 48_000)
+        let chain = DSPChain(sampleRate: 48_000, channelCount: 2)
+
+        // Two sets whose every band differs, so a torn copy lands on a curve
+        // that matches neither.
+        func parameters(gain: Double) -> EngineParameters {
+            EngineParameters(
+                isBypassed: false,
+                preampDecibels: 0,
+                bands: EqualizerBand.graphicDefaults.map { band in
+                    var copy = band
+                    copy.gainDecibels = gain
+                    return copy
+                }
+            )
+        }
+        let quiet = parameters(gain: -6)
+        let loud = parameters(gain: 6)
+
+        // Reference curves, measured off the audio path.
+        let quietChain = DSPChain(sampleRate: 48_000, channelCount: 2)
+        quiet.apply(to: quietChain)
+        let quietCurve = quietChain.magnitudeDecibels(atFrequency: 1_000)
+
+        let loudChain = DSPChain(sampleRate: 48_000, channelCount: 2)
+        loud.apply(to: loudChain)
+        let loudCurve = loudChain.magnitudeDecibels(atFrequency: 1_000)
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for index in 0..<2_000 {
+                    bridge.publish(index.isMultiple(of: 2) ? quiet : loud)
+                }
+            }
+            group.addTask {
+                for _ in 0..<2_000 {
+                    bridge.applyPendingChanges(to: chain)
+                    let curve = chain.magnitudeDecibels(atFrequency: 1_000)
+                    #expect(
+                        abs(curve - quietCurve) < 0.5
+                            || abs(curve - loudCurve) < 0.5
+                            || curve == 0
+                    )
+                }
+            }
+        }
+    }
+
     @Test("concurrent publishing never loses the final value")
     func concurrentPublishing() async {
         let bridge = ParameterBridge(sampleRate: 48_000)
@@ -3839,7 +3872,8 @@ struct ParameterBridgeTests {
 - [ ] **Step 8: Run the tests and the full suite**
 
 Run: `swift test`
-Expected: PASS, all suites, roughly 65 tests.
+Expected: PASS, all suites. The package is at 70 tests before this
+task, and this task adds twelve, so expect 82.
 
 - [ ] **Step 9: Build the app to confirm the package change did not break it**
 
