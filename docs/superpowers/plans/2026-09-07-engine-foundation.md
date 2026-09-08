@@ -2910,8 +2910,12 @@ final class ProcessTap {
 
         let ownProcess = try AudioObjectID.processObject(forPID: getpid())
 
+        // The Swift overlay refines this initialiser to take raw
+        // `AudioObjectID` values, not `NSNumber`, despite the Objective-C
+        // header taking an NSArray. Wrapping them boxes the wrong type and
+        // does not compile.
         let description = CATapDescription(
-            stereoGlobalTapButExcludeProcesses: [NSNumber(value: ownProcess)]
+            stereoGlobalTapButExcludeProcesses: [ownProcess]
         )
         description.uuid = uuid
         description.name = "Sonora System Tap"
