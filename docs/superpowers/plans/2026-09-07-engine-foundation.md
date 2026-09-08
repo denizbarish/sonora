@@ -2491,7 +2491,12 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_HARDENED_RUNTIME: YES
-        CODE_SIGN_STYLE: Automatic
+        # Manual, not Automatic. Automatic makes Xcode validate the account
+        # behind DEVELOPMENT_TEAM through its own machinery, which fails with
+        # "No Account for Team" whenever xcodebuild cannot see the Xcode
+        # account, and then falls back to ad hoc signing while silently turning
+        # Hardened Runtime off. Naming the identity directly avoids all of it.
+        CODE_SIGN_STYLE: Manual
         INFOPLIST_FILE: Sonora/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_ENTITLEMENTS: Sonora/Sonora.entitlements
@@ -2499,7 +2504,11 @@ targets:
         # Xcode falls back to ad hoc signing and silently turns Hardened
         # Runtime off, and an ad hoc binary can never hold the system audio
         # permission, because TCC keys that record to the signing identity.
-        DEVELOPMENT_TEAM: $(SONORA_DEVELOPMENT_TEAM)
+        # Ad hoc unless SONORA_CODE_SIGN_IDENTITY names a real identity. An
+        # ad hoc build compiles and launches, but can never hold the system
+        # audio permission: TCC keys that record to the signing identity, so
+        # the prompt never appears. See App/README.md.
+        CODE_SIGN_IDENTITY: $(SONORA_CODE_SIGN_IDENTITY:default=-)
 ```
 
 - [ ] **Step 3: Write the Info.plist**
