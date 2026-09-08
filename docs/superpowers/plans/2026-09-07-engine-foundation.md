@@ -2478,10 +2478,11 @@ targets:
         product: SonoraProfiles
       - package: SonoraCore
         product: SonoraPersistence
-    info:
-      path: Sonora/Info.plist
-    entitlements:
-      path: Sonora/Sonora.entitlements
+    # No `info:` or `entitlements:` keys on purpose. Those tell XcodeGen to
+    # GENERATE those files, overwriting the hand-written ones on every run, and
+    # the generated Info.plist drops NSAudioCaptureUsageDescription, which is
+    # the key the whole audio permission depends on. The build settings below
+    # point at the committed files instead.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.sonora.Sonora
@@ -2493,6 +2494,12 @@ targets:
         CODE_SIGN_STYLE: Automatic
         INFOPLIST_FILE: Sonora/Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Sonora/Sonora.entitlements
+        # Empty unless SONORA_DEVELOPMENT_TEAM is exported. Without a team
+        # Xcode falls back to ad hoc signing and silently turns Hardened
+        # Runtime off, and an ad hoc binary can never hold the system audio
+        # permission, because TCC keys that record to the signing identity.
+        DEVELOPMENT_TEAM: $(SONORA_DEVELOPMENT_TEAM)
 ```
 
 - [ ] **Step 3: Write the Info.plist**
