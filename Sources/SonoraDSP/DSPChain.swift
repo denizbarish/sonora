@@ -6,9 +6,17 @@ import Foundation
 /// One instance is owned by the render loop and processes every buffer that
 /// comes out of the process tap. `process` allocates nothing and takes no locks.
 ///
-/// Not thread safe. The engine calls the setters from the interface thread only
-/// through the parameter bridge, which guarantees they never run concurrently
-/// with `process`.
+/// Not thread safe, and the split matches `EqualizerChain`'s.
+///
+/// - `update(bands:)`, `preampDecibels` and `isBypassed` are the setup path.
+///   Set them before the render callback starts, or while it is stopped. Never
+///   while audio is flowing: they are plain stored state with no
+///   synchronisation, and a concurrent write races the render thread.
+/// - `applyResolved` is the live path and runs on the render thread itself,
+///   with coefficients already computed on the setup thread.
+///
+/// `@unchecked Sendable` asserts that callers honour that split. It provides
+/// no safety of its own.
 public final class DSPChain: @unchecked Sendable {
 
     /// Digital gain applied before the equalizer, in decibels. This is Sonora's
@@ -32,14 +40,34 @@ public final class DSPChain: @unchecked Sendable {
     private let equalizer: EqualizerChain
     private let channelCount: Int
     private var preampRamp: SmoothedValue
-    private var limiters: [SoftLimiter]
-    private let limiterEngaged = ManagedAtomic<Bool>(false)
+    /// One limiter per channel, allocated once. Held as a raw buffer rather
+    /// than an `Array` for the same reason `EqualizerChain.filters` is: Array
+    /// storage does a uniqueness check on access, and the render thread must do
+    /// no reference counting at all.
+    private let limiters: UnsafeMutableBufferPointer<SoftLimiter>
+
+    /// `UnsafeAtomic` rather than `ManagedAtomic` because the latter is a
+    /// class, and touching a class reference on the render thread can emit
+    /// retain and release traffic in unoptimised builds.
+    private let limiterEngaged: UnsafeAtomic<Bool>
 
     public init(sampleRate: Double, channelCount: Int) {
-        self.channelCount = max(channelCount, 1)
-        self.equalizer = EqualizerChain(sampleRate: sampleRate, channelCount: channelCount)
+        let channels = max(channelCount, 1)
+        self.channelCount = channels
+        self.equalizer = EqualizerChain(sampleRate: sampleRate, channelCount: channels)
         self.preampRamp = SmoothedValue(value: 1, sampleRate: sampleRate)
-        self.limiters = Array(repeating: SoftLimiter(), count: max(channelCount, 1))
+
+        let storage = UnsafeMutableBufferPointer<SoftLimiter>.allocate(capacity: channels)
+        storage.initialize(repeating: SoftLimiter())
+        self.limiters = storage
+
+        self.limiterEngaged = UnsafeAtomic<Bool>.create(false)
+    }
+
+    deinit {
+        limiters.deinitialize()
+        limiters.deallocate()
+        limiterEngaged.destroy()
     }
 
     /// Replaces the equalizer bands, recomputing coefficients.
@@ -83,6 +111,10 @@ public final class DSPChain: @unchecked Sendable {
 
     /// Runs the chain over an interleaved buffer in place.
     public func process(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int) {
+        // A negative frame count would trap in the loops below, and trapping on
+        // the audio thread kills the render callback outright.
+        guard frameCount > 0 else { return }
+
         guard !isBypassed else {
             // Nothing is being shaped while bypassed, so the indicator must not
             // stay lit from whatever the last processed buffer happened to do.
@@ -100,26 +132,22 @@ public final class DSPChain: @unchecked Sendable {
 
         equalizer.process(buffer, frameCount: frameCount)
 
-        // One unsafe buffer pass for the whole limiter stage. Subscripting
-        // `limiters` directly would go through Array's uniqueness check on
-        // every access, which is exactly the reference counting the audio
-        // thread must not do.
+        // The limiter stage indexes the raw buffer directly: no closure, no
+        // Array, no uniqueness check.
         var engaged = false
-        limiters.withUnsafeMutableBufferPointer { limiterPointer in
-            for index in limiterPointer.indices {
-                limiterPointer[index].clearEngagedFlag()
-            }
+        for index in 0..<channelCount {
+            limiters[index].clearEngagedFlag()
+        }
 
-            for frame in 0..<frameCount {
-                for channel in 0..<channelCount {
-                    let offset = frame * channelCount + channel
-                    buffer[offset] = limiterPointer[channel].process(buffer[offset])
-                }
+        for frame in 0..<frameCount {
+            for channel in 0..<channelCount {
+                let offset = frame * channelCount + channel
+                buffer[offset] = limiters[channel].process(buffer[offset])
             }
+        }
 
-            for index in limiterPointer.indices where limiterPointer[index].isEngaged {
-                engaged = true
-            }
+        for index in 0..<channelCount where limiters[index].isEngaged {
+            engaged = true
         }
 
         limiterEngaged.store(engaged, ordering: .releasing)
@@ -129,7 +157,7 @@ public final class DSPChain: @unchecked Sendable {
     public func reset() {
         equalizer.reset()
         preampRamp.snap(to: preampRamp.target)
-        for index in limiters.indices {
+        for index in 0..<channelCount {
             limiters[index].clearEngagedFlag()
         }
         limiterEngaged.store(false, ordering: .releasing)

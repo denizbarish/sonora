@@ -46,7 +46,22 @@ public struct BiquadCoefficients: Equatable, Sendable {
         gainDecibels: Double,
         sampleRate: Double
     ) {
-        // Guard against a frequency at or above Nyquist, which produces NaN.
+        // A sample rate of zero makes every coefficient NaN, and a NaN
+        // coefficient cannot be healed the way NaN state can: `output` is
+        // computed from it on every sample, so the section emits NaN forever,
+        // the limiter turns that into zeroes, and the channel is silent for the
+        // life of the process. Core Audio reports a rate of zero for a device
+        // whose format has not resolved yet, so this is reachable. Passing the
+        // signal through untouched is the safe answer, matching what
+        // `SmoothedValue` does for the same degenerate input.
+        guard sampleRate > 0 else {
+            self = .identity
+            return
+        }
+
+        // Keep w0 strictly inside (0, pi). This is not NaN protection: a
+        // frequency at or above Nyquist is well behaved at any positive sample
+        // rate. It just avoids a degenerate filter design at the boundary.
         let nyquist = sampleRate / 2
         let f0 = min(max(frequency, 1), nyquist - 1)
         let safeQ = max(q, 0.0001)

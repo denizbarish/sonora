@@ -101,4 +101,14 @@ struct BiquadCoefficientsTests {
         #expect(coefficients.a1 == 0)
         #expect(coefficients.a2 == 0)
     }
+
+    @Test("a zero sample rate yields identity rather than NaN coefficients")
+    func zeroSampleRateIsIdentity() {
+        let coefficients = BiquadCoefficients(
+            kind: .peaking, frequency: 1_000, q: 1.41, gainDecibels: 6, sampleRate: 0
+        )
+
+        #expect(coefficients == .identity)
+        #expect(coefficients.b0.isNaN == false)
+    }
 }

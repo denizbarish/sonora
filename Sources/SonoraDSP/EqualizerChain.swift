@@ -19,9 +19,8 @@
 /// - `update(bands:)` is the setup path. Call it before the render callback
 ///   starts, or while it is stopped. Never while audio is flowing.
 /// - `applyCoefficients` is the live path. Call it only from the render callback
-///   itself, with coefficients already resolved elsewhere. In Sonora the
-///   parameter bridge does that resolving on the interface thread and hands the
-///   finished floats across.
+///   itself, with coefficients already resolved on the setup thread and handed
+///   across as finished floats.
 ///
 /// Calling `update(bands:)` while the render callback runs is a data race. A
 /// five float coefficient set has no atomic store, so the audio thread can read
@@ -167,7 +166,9 @@ public final class EqualizerChain: @unchecked Sendable {
     }
 
     /// Computes coefficients for a band list without touching a chain.
-    /// This is how the parameter bridge does its work on the interface thread.
+    ///
+    /// This is the setup-thread half of the split: resolve here, then hand the
+    /// result to `applyCoefficients` on the render thread.
     public static func coefficients(
         for bands: [EqualizerBand],
         sampleRate: Double

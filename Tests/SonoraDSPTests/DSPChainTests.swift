@@ -198,4 +198,18 @@ struct DSPChainTests {
         #expect(clean.allSatisfy { $0.isFinite })
         #expect(clean.contains { abs($0) > 0.1 })
     }
+
+    @Test("a chain built at a zero sample rate passes audio instead of muting it")
+    func zeroSampleRateIsTransparent() {
+        let chain = DSPChain(sampleRate: 0, channelCount: 2)
+        var buffer = [Float](repeating: 0.3, count: 512)
+
+        buffer.withUnsafeMutableBufferPointer { pointer in
+            chain.process(pointer.baseAddress!, frameCount: 256)
+        }
+
+        // NaN coefficients would make every sample NaN, which the limiter turns
+        // into silence for as long as the process lives.
+        #expect(buffer.allSatisfy { abs($0 - 0.3) < 0.001 })
+    }
 }

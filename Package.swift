@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "SonoraCore",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("14.4")],
     products: [
         .library(name: "SonoraDSP", targets: ["SonoraDSP"]),
         .library(name: "SonoraProfiles", targets: ["SonoraProfiles"]),
