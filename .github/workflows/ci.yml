@@ -34,5 +34,11 @@ jobs:
       # buffer. An off-by-one there is silent memory corruption in release
       # builds and cannot be caught behaviourally, so the suite also runs under
       # AddressSanitizer.
+      # Time-boxed on purpose. An earlier run built cleanly under the
+      # sanitizer and then produced no output for six hours until GitHub's job
+      # timeout killed it, so this step must fail fast rather than burn a
+      # runner. Parallel execution is off because the sanitizer runtime and the
+      # test runner's process handling are the suspected cause of the hang.
       - name: Test under AddressSanitizer
-        run: swift test --sanitize=address
+        timeout-minutes: 20
+        run: swift test --sanitize=address --no-parallel
