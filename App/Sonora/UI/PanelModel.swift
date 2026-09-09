@@ -20,7 +20,13 @@ final class PanelModel {
     let presets: [Preset] = BuiltInPresets.all
 
     var systemVolume: Float {
-        didSet { volume.scalar = systemVolume }
+        didSet {
+            // The device's own listener writes back into this property, so
+            // without a guard the two chase each other and the slider jitters
+            // under the hand that is dragging it.
+            guard abs(systemVolume - volume.scalar) > 0.001 else { return }
+            volume.scalar = systemVolume
+        }
     }
 
     var preampDecibels: Double {
@@ -143,7 +149,12 @@ final class PanelModel {
     }
 
     private func volumeChanged() {
-        systemVolume = volume.scalar
+        // Same guard in the other direction: only take the device's value when
+        // it genuinely differs from what the slider already shows.
+        let current = volume.scalar
+        if abs(systemVolume - current) > 0.001 {
+            systemVolume = current
+        }
         outputDeviceName = volume.outputDeviceName
         availableOutputs = volume.availableOutputs
     }

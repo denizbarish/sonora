@@ -53,6 +53,14 @@ public enum EqualizerCurve {
         count: Int
     ) -> [CurvePoint] {
         guard count > 0 else { return [] }
+
+        // A non-positive bound makes the ratio below NaN or infinite, and every
+        // frequency after the first comes out NaN. This codebase has been bitten
+        // by exactly this class once already: an unguarded NaN from a zero
+        // sample rate reached the coefficient math and silenced a channel for
+        // the life of the process.
+        guard lowest > 0, highest > 0 else { return [] }
+
         guard count > 1 else {
             return [
                 CurvePoint(
@@ -66,14 +74,27 @@ public enum EqualizerCurve {
 
         let ratio = pow(highest / lowest, 1 / Double(count - 1))
 
+        // Coefficients do not depend on the frequency they are evaluated at, so
+        // they are built once rather than once per point. At 120 points and ten
+        // bands that is ten constructions instead of twelve hundred.
+        let coefficients = bands.map { band in
+            BiquadCoefficients(
+                kind: band.kind,
+                frequency: band.frequency,
+                q: band.q,
+                gainDecibels: band.gainDecibels,
+                sampleRate: sampleRate
+            )
+        }
+
         return (0..<count).map { index in
             let frequency = lowest * pow(ratio, Double(index))
-            return CurvePoint(
-                frequency: frequency,
-                decibels: magnitudeDecibels(
-                    of: bands, atFrequency: frequency, sampleRate: sampleRate
+            let decibels = coefficients.reduce(Float(0)) { total, filter in
+                total + filter.magnitudeDecibels(
+                    atFrequency: frequency, sampleRate: sampleRate
                 )
-            )
+            }
+            return CurvePoint(frequency: frequency, decibels: decibels)
         }
     }
 }

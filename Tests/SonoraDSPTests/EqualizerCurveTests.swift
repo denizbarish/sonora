@@ -46,7 +46,9 @@ struct EqualizerCurveTests {
                 of: bands, atFrequency: frequency, sampleRate: sampleRate
             )
             let engine = chain.magnitudeDecibels(atFrequency: frequency)
-            #expect(abs(curve - engine) < 0.001)
+            // Both paths run the same coefficient math, so anything but a
+            // near-exact match means one of them drifted.
+            #expect(abs(curve - engine) < 0.000_1)
         }
     }
 
@@ -78,6 +80,42 @@ struct EqualizerCurveTests {
 
         #expect(points.count == 1)
         #expect(points[0].frequency == 20)
+    }
+
+    @Test("a non-positive frequency bound returns nothing rather than NaN")
+    func nonPositiveBounds() {
+        // pow of a negative base to a fractional exponent is NaN, and a zero
+        // base makes the ratio infinite, so every point after the first would
+        // carry a NaN frequency.
+        for (lowest, highest) in [(0.0, 20_000.0), (-20.0, 20_000.0), (20.0, 0.0)] {
+            let points = EqualizerCurve.points(
+                of: EqualizerBand.graphicDefaults,
+                sampleRate: sampleRate,
+                from: lowest, to: highest, count: 50
+            )
+            #expect(points.isEmpty)
+        }
+    }
+
+    @Test("the curve threads every band field through, not just gain")
+    func honoursQAndKind() {
+        // Only gain varies in the other tests, so a bug that dropped q or kind
+        // on the way into the coefficients would go unnoticed.
+        let bands = [
+            EqualizerBand(kind: .lowShelf, frequency: 120, q: 0.707, gainDecibels: 5),
+            EqualizerBand(kind: .peaking, frequency: 1_000, q: 6, gainDecibels: -8),
+            EqualizerBand(kind: .highShelf, frequency: 6_000, q: 0.707, gainDecibels: 3),
+        ]
+
+        let chain = EqualizerChain(sampleRate: sampleRate, channelCount: 1)
+        chain.update(bands: bands)
+
+        for frequency in [50.0, 120, 1_000, 3_000, 12_000] {
+            let curve = EqualizerCurve.magnitudeDecibels(
+                of: bands, atFrequency: frequency, sampleRate: sampleRate
+            )
+            #expect(abs(curve - chain.magnitudeDecibels(atFrequency: frequency)) < 0.000_1)
+        }
     }
 
     @Test("a nonsensical count returns nothing rather than trapping")

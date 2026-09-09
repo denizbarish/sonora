@@ -228,6 +228,11 @@ public enum EqualizerCurve {
         count: Int
     ) -> [CurvePoint] {
         guard count > 0 else { return [] }
+
+        // A non-positive bound makes the ratio below NaN or infinite, and every
+        // frequency after the first comes out NaN.
+        guard lowest > 0, highest > 0 else { return [] }
+
         guard count > 1 else {
             return [
                 CurvePoint(
@@ -568,7 +573,13 @@ final class PanelModel {
     let presets: [Preset] = BuiltInPresets.all
 
     var systemVolume: Float {
-        didSet { volume.scalar = systemVolume }
+        didSet {
+            // The device's own listener writes back into this property, so
+            // without a guard the two chase each other and the slider jitters
+            // under the hand that is dragging it.
+            guard abs(systemVolume - volume.scalar) > 0.001 else { return }
+            volume.scalar = systemVolume
+        }
     }
 
     var preampDecibels: Double {
