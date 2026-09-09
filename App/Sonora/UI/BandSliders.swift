@@ -1,33 +1,21 @@
 import SonoraDSP
 import SwiftUI
 
-/// The ten band sliders, laid out under the curve.
+/// The ten band controls, laid out under the curve.
 struct BandSliders: View {
 
     @Binding var gains: [Double]
 
     var body: some View {
-        // Ten columns of 26 plus nine gaps of 4 is 296 points, which fits
-        // inside the panel's 360 with its padding.
-        HStack(alignment: .bottom, spacing: 4) {
+        // The columns are flexible and the control inside each one is a fixed
+        // 26 points, so the row spans the panel's content width and lines its
+        // outer edges up with the preamp slider above it. Ten controls take
+        // 260 of the 332 points available, leaving 72 for the gaps, which is
+        // more than the 4 points the row needs to fit.
+        HStack(alignment: .top, spacing: 0) {
             ForEach(Array(EqualizerBand.graphicFrequencies.enumerated()), id: \.offset) { index, frequency in
                 VStack(spacing: 4) {
-                    Slider(
-                        value: binding(for: index),
-                        in: EqualizerBand.gainRange
-                    )
-                    // Order matters here. `rotationEffect` changes what is
-                    // drawn, not what is laid out: the slider still occupies
-                    // its natural horizontal length. So the first frame sets
-                    // that length, the rotation stands it upright, and the
-                    // second frame reserves the upright footprint. Without the
-                    // second one every slider claims 104 points of width and
-                    // the row runs off both sides of the panel.
-                    .frame(width: 104)
-                    .rotationEffect(.degrees(-90))
-                    .frame(width: 22, height: 104)
-                    .accessibilityLabel(Self.label(for: frequency))
-                    .accessibilityValue(Self.value(for: gains[safe: index] ?? 0))
+                    BandControl(frequency: frequency, gain: binding(for: index))
 
                     Text(Self.shortLabel(for: frequency))
                         .font(.system(size: 9))
@@ -35,7 +23,7 @@ struct BandSliders: View {
                         .monospacedDigit()
                         .fixedSize()
                 }
-                .frame(width: 26)
+                .frame(maxWidth: .infinity)
             }
         }
     }
@@ -56,16 +44,6 @@ struct BandSliders: View {
         frequency >= 1_000
             ? "\(Int(frequency / 1_000))k"
             : "\(Int(frequency))"
-    }
-
-    private static func label(for frequency: Double) -> String {
-        frequency >= 1_000
-            ? "\(Int(frequency / 1_000)) kilohertz band"
-            : "\(Int(frequency)) hertz band"
-    }
-
-    private static func value(for gain: Double) -> String {
-        String(format: "%+.1f decibels", gain)
     }
 }
 

@@ -35,5 +35,21 @@ struct PresetStrip: View {
             .padding(.horizontal, 1)
         }
         .scrollIndicators(.never)
+        // The row is wider than the panel and always will be, so without a cue
+        // the last pill just ends mid-word and reads as a rendering fault. The
+        // fade makes the trailing edge say "this continues" instead. It runs
+        // over the trailing tenth only, so a pill at rest is never dimmed
+        // unless it is genuinely being cut off.
+        .mask(
+            LinearGradient(
+                stops: [
+                    .init(color: .black, location: 0),
+                    .init(color: .black, location: 0.9),
+                    .init(color: .black.opacity(0), location: 1)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
     }
 }

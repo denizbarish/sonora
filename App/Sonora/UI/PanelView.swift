@@ -1,3 +1,4 @@
+import AppKit
 import SonoraDSP
 import SwiftUI
 
@@ -13,12 +14,7 @@ struct PanelView: View {
             Divider()
             preamp
             equalizer
-            Divider()
-            PresetStrip(
-                presets: model.presets,
-                activeID: model.activePresetID,
-                onSelect: model.selectPreset
-            )
+            presets
             footer
         }
         .padding(14)
@@ -42,10 +38,13 @@ struct PanelView: View {
                 .accessibilityLabel("Output device")
 
                 Spacer()
+
+                // The switch carries its own name. Unlabelled, it was a control
+                // in the corner of the panel with nothing saying what it did.
                 Toggle("Bypass", isOn: $model.isBypassed)
                     .toggleStyle(.switch)
                     .controlSize(.mini)
-                    .labelsHidden()
+                    .font(.system(size: 11))
                     .accessibilityLabel("Bypass equalizer")
             }
 
@@ -93,14 +92,40 @@ struct PanelView: View {
         ZStack(alignment: .top) {
             CurveView(
                 points: model.curvePoints(count: 120),
-                range: Self.gainRange
+                range: Self.gainRange,
+                verticalInset: BandMetrics.curveInset
             )
-            .frame(height: 110)
+            .frame(height: BandMetrics.trackHeight)
             .opacity(model.isBypassed ? 0.25 : 1)
+
+            // 0 dB, drawn once across the whole equalizer rather than left for
+            // the eye to infer from ten separate controls. Every fill above it
+            // is a boost and every fill below it is a cut, and the line is what
+            // makes that readable without touching anything.
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(height: 1)
+                .frame(height: BandMetrics.trackHeight, alignment: .center)
 
             BandSliders(gains: $model.bandGains)
         }
-        .frame(height: 140)
+    }
+
+    /// The preset row. The caption names what the pills are, which is what
+    /// keeps "Flat" reading as one preset among several rather than as a
+    /// command; the reset button that used to repeat it in the footer is gone.
+    private var presets: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Presets")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            PresetStrip(
+                presets: model.presets,
+                activeID: model.activePresetID,
+                onSelect: model.selectPreset
+            )
+        }
     }
 
     private var footer: some View {
@@ -120,9 +145,6 @@ struct PanelView: View {
                 Button("Try Again", action: model.retry)
                     .controlSize(.small)
             }
-
-            Button("Flat", action: model.resetToFlat)
-                .controlSize(.small)
         }
     }
 }
