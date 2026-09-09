@@ -1094,7 +1094,15 @@ struct PanelView: View {
                     .monospacedDigit()
                     // Above unity the limiter starts doing real work, so the
                     // number says so rather than leaving it to be discovered.
-                    .foregroundStyle(model.preampDecibels > 0 ? .orange : .secondary)
+                    //
+                    // Wrapped in AnyShapeStyle because the two branches are
+                    // different types, Color and HierarchicalShapeStyle, and
+                    // the type checker cannot unify them in a ternary.
+                    .foregroundStyle(
+                        model.preampDecibels > 0
+                            ? AnyShapeStyle(.orange)
+                            : AnyShapeStyle(.secondary)
+                    )
             }
             Slider(value: $model.preampDecibels, in: Self.gainRange)
                 .accessibilityLabel("Preamp")
@@ -1119,7 +1127,11 @@ struct PanelView: View {
         HStack {
             Text(model.stateDescription)
                 .font(.system(size: 10))
-                .foregroundStyle(model.isRunning ? .secondary : .orange)
+                .foregroundStyle(
+                    model.isRunning
+                        ? AnyShapeStyle(.secondary)
+                        : AnyShapeStyle(.orange)
+                )
                 .lineLimit(1)
 
             Spacer()
