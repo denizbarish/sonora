@@ -2478,10 +2478,11 @@ targets:
         product: SonoraProfiles
       - package: SonoraCore
         product: SonoraPersistence
-    info:
-      path: Sonora/Info.plist
-    entitlements:
-      path: Sonora/Sonora.entitlements
+    # No `info:` or `entitlements:` keys on purpose. Those tell XcodeGen to
+    # GENERATE those files, overwriting the hand-written ones on every run, and
+    # the generated Info.plist drops NSAudioCaptureUsageDescription, which is
+    # the key the whole audio permission depends on. The build settings below
+    # point at the committed files instead.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.sonora.Sonora
@@ -2490,9 +2491,24 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_HARDENED_RUNTIME: YES
-        CODE_SIGN_STYLE: Automatic
+        # Manual, not Automatic. Automatic makes Xcode validate the account
+        # behind DEVELOPMENT_TEAM through its own machinery, which fails with
+        # "No Account for Team" whenever xcodebuild cannot see the Xcode
+        # account, and then falls back to ad hoc signing while silently turning
+        # Hardened Runtime off. Naming the identity directly avoids all of it.
+        CODE_SIGN_STYLE: Manual
         INFOPLIST_FILE: Sonora/Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Sonora/Sonora.entitlements
+        # Empty unless SONORA_DEVELOPMENT_TEAM is exported. Without a team
+        # Xcode falls back to ad hoc signing and silently turns Hardened
+        # Runtime off, and an ad hoc binary can never hold the system audio
+        # permission, because TCC keys that record to the signing identity.
+        # Ad hoc unless SONORA_CODE_SIGN_IDENTITY names a real identity. An
+        # ad hoc build compiles and launches, but can never hold the system
+        # audio permission: TCC keys that record to the signing identity, so
+        # the prompt never appears. See App/README.md.
+        CODE_SIGN_IDENTITY: $(SONORA_CODE_SIGN_IDENTITY:default=-)
 ```
 
 - [ ] **Step 3: Write the Info.plist**
@@ -2894,8 +2910,12 @@ final class ProcessTap {
 
         let ownProcess = try AudioObjectID.processObject(forPID: getpid())
 
+        // The Swift overlay refines this initialiser to take raw
+        // `AudioObjectID` values, not `NSNumber`, despite the Objective-C
+        // header taking an NSArray. Wrapping them boxes the wrong type and
+        // does not compile.
         let description = CATapDescription(
-            stereoGlobalTapButExcludeProcesses: [NSNumber(value: ownProcess)]
+            stereoGlobalTapButExcludeProcesses: [ownProcess]
         )
         description.uuid = uuid
         description.name = "Sonora System Tap"
@@ -3222,7 +3242,7 @@ final class RenderLoop {
     }
 
     func stop() {
-        guard let procID, aggregate.isCreated else {
+        guard let procID = ioProcID, aggregate.isCreated else {
             isRunning = false
             return
         }

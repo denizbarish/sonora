@@ -3,3 +3,6 @@
 DerivedData/
 *.xcuserstate
 xcuserdata/
+
+App/Sonora.xcodeproj/
+*.xcworkspace/
