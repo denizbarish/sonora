@@ -1,6 +1,7 @@
 import AppKit
 import SonoraPersistence
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private(set) var statusItem: NSStatusItem!

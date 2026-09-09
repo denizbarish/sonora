@@ -51,11 +51,12 @@ extension AudioObjectID {
 
     /// Reads an `AudioStreamBasicDescription` property.
     func readStreamDescription(
-        _ selector: AudioObjectPropertySelector
+        _ selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
     ) throws -> AudioStreamBasicDescription {
         var address = AudioObjectPropertyAddress(
             mSelector: selector,
-            mScope: kAudioObjectPropertyScopeGlobal,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
         var description = AudioStreamBasicDescription()

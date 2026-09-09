@@ -26,7 +26,10 @@ final class RenderLoop {
     }
 
     func start() throws {
-        guard !isRunning, aggregate.isCreated else { return }
+        guard !isRunning else { return }
+        guard aggregate.isCreated else {
+            throw AudioEngineError.ioProcCreationFailed(kAudioHardwareBadObjectError)
+        }
 
         let block = processBlock
 
@@ -50,6 +53,12 @@ final class RenderLoop {
 
             let byteCount = min(input.mDataByteSize, output.mDataByteSize)
             memcpy(destination, source, Int(byteCount))
+
+            // A non-interleaved device presents one buffer per channel, and the
+            // DSP chain only understands interleaved. Anything else falls
+            // through as the straight copy above rather than being processed
+            // into the wrong layout.
+            guard inputBuffers.count == 1, outputBuffers.count == 1 else { return }
 
             let channelCount = Int(output.mNumberChannels)
             guard channelCount > 0 else { return }

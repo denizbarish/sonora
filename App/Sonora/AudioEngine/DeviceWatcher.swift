@@ -7,7 +7,7 @@ import Foundation
 /// The aggregate device is built around one specific output device. When that
 /// device changes, the aggregate must be torn down and rebuilt, otherwise audio
 /// stops with no error.
-final class DeviceWatcher: @unchecked Sendable {
+final class DeviceWatcher {
 
     private let onChange: () -> Void
     private let queue = DispatchQueue(label: "com.sonora.DeviceWatcher")
@@ -19,22 +19,26 @@ final class DeviceWatcher: @unchecked Sendable {
         mElement: kAudioObjectPropertyElementMain
     )
 
-    init(onDefaultOutputChange: @escaping () -> Void) {
+    init(onDefaultOutputChange: @escaping @Sendable () -> Void) {
         self.onChange = onDefaultOutputChange
     }
 
-    func start() {
+    func start() throws {
         guard listenerBlock == nil else { return }
 
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
-            DispatchQueue.main.async { self.onChange() }
+            self.onChange()
         }
 
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID.system, &address, queue, block
         )
-        guard status == noErr else { return }
+        guard status == noErr else {
+            throw AudioEngineError.propertyReadFailed(
+                kAudioHardwarePropertyDefaultOutputDevice, status
+            )
+        }
         listenerBlock = block
     }
 

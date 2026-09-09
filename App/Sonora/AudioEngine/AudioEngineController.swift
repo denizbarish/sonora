@@ -9,6 +9,7 @@ import SonoraPersistence
 /// The controller guarantees the rule from the design document: any failure ends
 /// in bypass, which means the tap is destroyed and the system's own audio route
 /// is back. It never leaves the user without sound.
+@MainActor
 final class AudioEngineController {
 
     enum State: Equatable {
@@ -38,6 +39,7 @@ final class AudioEngineController {
     private var watcher: DeviceWatcher?
 
     private var settings: Settings
+    private var deviceChangeTask: Task<Void, Never>?
 
     init(settingsStore: SettingsStore) {
         self.settingsStore = settingsStore
@@ -71,7 +73,11 @@ final class AudioEngineController {
     /// Records which preset the user picked, alongside the bands it produced.
     func setActivePresetID(_ id: String?) {
         settings.activePresetID = id
-        try? settingsStore.save(settings)
+        do {
+            try settingsStore.save(settings)
+        } catch {
+            logger.error("Could not save settings: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     var activePresetID: String? { settings.activePresetID }
@@ -80,9 +86,13 @@ final class AudioEngineController {
         guard state != .running else { return }
 
         let watcher = DeviceWatcher { [weak self] in
-            self?.handleOutputDeviceChange()
+            Task { @MainActor in self?.scheduleOutputDeviceChange() }
         }
-        watcher.start()
+        do {
+            try watcher.start()
+        } catch {
+            logger.error("Could not start device watcher: \(error.localizedDescription, privacy: .public)")
+        }
         self.watcher = watcher
 
         buildAudioPath()
@@ -91,6 +101,8 @@ final class AudioEngineController {
     func stop() {
         watcher?.stop()
         watcher = nil
+        deviceChangeTask?.cancel()
+        deviceChangeTask = nil
         tearDownAudioPath()
         state = .stopped
     }
@@ -104,10 +116,13 @@ final class AudioEngineController {
             try aggregate.create()
             self.aggregate = aggregate
 
-            let format = try tap.streamDescription()
+            // The output format, not the tap's. The chain indexes the output
+            // buffer, so it has to be built for the shape of that buffer.
+            let format = try aggregate.outputStreamDescription()
+            let chainChannelCount = Int(format.mChannelsPerFrame)
             let chain = DSPChain(
                 sampleRate: format.mSampleRate,
-                channelCount: Int(format.mChannelsPerFrame)
+                channelCount: chainChannelCount
             )
             // Resolve coefficients for the real format before any audio flows.
             // This also republishes, so the first buffer picks the values up.
@@ -116,7 +131,14 @@ final class AudioEngineController {
 
             let bridge = self.bridge
             let renderLoop = RenderLoop(aggregate: aggregate)
-            renderLoop.processBlock = { buffer, frameCount, _ in
+            renderLoop.processBlock = { buffer, frameCount, channelCount in
+                // The chain indexes the buffer with its own channel count. If
+                // the device is handing us a different shape, processing would
+                // write past the end of the buffer, and the chain cannot be
+                // rebuilt from the render thread. Returning leaves the straight
+                // copy the render loop already made, so audio still passes.
+                guard channelCount == chainChannelCount else { return }
+
                 bridge.applyPendingChanges(to: chain)
                 chain.process(buffer, frameCount: frameCount)
             }
@@ -142,8 +164,33 @@ final class AudioEngineController {
         tap.invalidate()
     }
 
+    /// Coalesces a burst of device notifications into one rebuild.
+    ///
+    /// Plugging in headphones emits several default-output changes back to
+    /// back. Rebuilding for each one means several teardowns, several new taps,
+    /// and an audible gap for each.
+    private func scheduleOutputDeviceChange() {
+        deviceChangeTask?.cancel()
+        deviceChangeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            self?.handleOutputDeviceChange()
+        }
+    }
+
     /// Rebuilds the path around the new output device, preserving settings.
     private func handleOutputDeviceChange() {
+        // A notification already in flight when stop() ran still arrives, and
+        // rebuilding here would take the engine back to .running after a
+        // deliberate .stopped.
+        guard state != .stopped else { return }
+
+        // Several notifications can name the device we are already built on.
+        if let current = try? AudioObjectID.readDefaultOutputDevice(),
+           current == aggregate?.outputDeviceID {
+            return
+        }
+
         logger.info("Default output device changed, rebuilding")
         tearDownAudioPath()
 

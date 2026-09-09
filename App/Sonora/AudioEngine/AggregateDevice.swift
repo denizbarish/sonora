@@ -75,6 +75,20 @@ final class AggregateDevice {
         try objectID.readUInt32(kAudioDevicePropertyBufferFrameSize)
     }
 
+    /// The format the aggregate presents on its output side.
+    ///
+    /// This is what the render callback actually writes into, and it is not
+    /// necessarily the tap's format. A mono device, such as a Bluetooth headset
+    /// in HFP mode, reports one channel where the stereo global tap reports two.
+    /// Sizing the DSP chain from the tap instead walks off the end of the output
+    /// buffer, on the real-time thread, on every callback.
+    func outputStreamDescription() throws -> AudioStreamBasicDescription {
+        try objectID.readStreamDescription(
+            kAudioDevicePropertyStreamFormat,
+            scope: kAudioObjectPropertyScopeOutput
+        )
+    }
+
     /// The output device's own reported latency, in frames.
     func outputLatencyFrames() throws -> UInt32 {
         let latency = (try? outputDeviceID.readUInt32(kAudioDevicePropertyLatency)) ?? 0

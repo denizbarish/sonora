@@ -6,7 +6,8 @@ import SonoraProfiles
 ///
 /// This is a stepping stone, not the shipping interface. It exists so the engine
 /// can be driven and verified before the panel is built in the next plan.
-final class StatusMenuController: NSObject, @unchecked Sendable {
+@MainActor
+final class StatusMenuController: NSObject {
 
     private let engine: AudioEngineController
     private weak var statusItem: NSStatusItem?
@@ -19,8 +20,7 @@ final class StatusMenuController: NSObject, @unchecked Sendable {
     func install(in statusItem: NSStatusItem) {
         self.statusItem = statusItem
         engine.onStateChange = { [weak self] _ in
-            guard let self else { return }
-            DispatchQueue.main.async { self.rebuildMenu() }
+            self?.rebuildMenu()
         }
         rebuildMenu()
     }
