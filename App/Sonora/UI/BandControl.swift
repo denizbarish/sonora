@@ -214,8 +214,18 @@ struct GainSlider: View {
     private func drag(travel: Double) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                if gainAtDragStart == nil {
+                    gainAtDragStart = gain
+
+                    // The drag takes focus itself. On macOS a `.focusable()`
+                    // view is not focused by being clicked, unlike the stock
+                    // `Slider` this replaced, so without this a band moved with
+                    // the mouse still would not answer the arrow keys.
+                    isFocused = true
+                }
+
+                // Non-nil: the branch above just set it.
                 let start = gainAtDragStart ?? gain
-                gainAtDragStart = start
 
                 // A control with no room to travel would divide by zero, and
                 // there is no value a drag on it could mean anyway.

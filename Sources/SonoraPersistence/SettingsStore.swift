@@ -19,9 +19,11 @@ public final class SettingsStore {
         case corrupt(backupURL: URL?)
         /// The file was written by a newer version of Sonora.
         case futureVersion(Int)
-        /// The file came from an older schema and no longer decodes. Reported
-        /// separately from `corrupt` so an out of date file is never mistaken
-        /// for garbage and quarantined.
+        /// The file came from a schema older than anything this build can
+        /// decode. Reported separately from `corrupt` so an out of date file is
+        /// never mistaken for garbage and quarantined. A file from a schema the
+        /// decoder does still read is not this: if it will not decode, it is
+        /// corrupt.
         case staleVersion(Int)
     }
 
@@ -80,7 +82,7 @@ public final class SettingsStore {
             lastLoadFailure = nil
             return reconciled(settings)
         } catch {
-            if let storedVersion, storedVersion < Settings.currentSchemaVersion {
+            if let storedVersion, storedVersion < Settings.oldestDecodableSchemaVersion {
                 lastLoadFailure = .staleVersion(storedVersion)
                 return .defaults
             }

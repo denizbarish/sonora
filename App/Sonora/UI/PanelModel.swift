@@ -93,6 +93,9 @@ final class PanelModel {
         volume.onChange = { [weak self] in
             Task { @MainActor in self?.volumeChanged() }
         }
+        engine.onOutputDeviceChange = { [weak self] in
+            Task { @MainActor in self?.outputDeviceChanged() }
+        }
     }
 
     /// The curve the view draws, computed from the band definitions rather than
@@ -178,6 +181,19 @@ final class PanelModel {
         stateDescription = Self.describe(state)
         isRunning = state == .running
         outputDeviceName = volume.outputDeviceName
+    }
+
+    /// The engine rebuilt the audio path around a different output device.
+    ///
+    /// The state does not change across that rebuild, so `engineStateChanged`
+    /// never runs, and the device the panel talks to is a different Core Audio
+    /// object afterwards: without the refresh the volume slider would keep
+    /// writing to the old one, and the picker would keep offering whatever was
+    /// plugged in at launch.
+    private func outputDeviceChanged() {
+        volume.refresh()
+        outputDeviceName = volume.outputDeviceName
+        availableOutputs = volume.availableOutputs
     }
 
     private func volumeChanged() {

@@ -9,6 +9,15 @@ public struct Settings: Codable, Equatable, Sendable {
 
     public static let currentSchemaVersion = 2
 
+    /// The oldest schema this build's decoder can still read.
+    ///
+    /// The hand-written `init(from:)` below reads version 1 files, so a version
+    /// 1 file that fails to decode is broken, not out of date. Tying that
+    /// judgement to `currentSchemaVersion` instead would reclassify every
+    /// corrupt file as merely stale the moment the version is raised, and a
+    /// stale file is not quarantined.
+    public static let oldestDecodableSchemaVersion = 1
+
     /// How many recently used preset identifiers are kept on disk.
     ///
     /// More than the interface shows, so the row still has something to fall

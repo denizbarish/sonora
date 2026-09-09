@@ -92,11 +92,7 @@ final class SystemVolume {
     /// Makes a device the system default. The engine's own device watcher
     /// notices and rebuilds the audio path around it, so nothing here has to.
     func selectOutput(_ device: OutputDevice) {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = Self.defaultOutputDeviceAddress
         var id = device.id
         let size = UInt32(MemoryLayout<AudioObjectID>.size)
 
@@ -108,13 +104,10 @@ final class SystemVolume {
         }
     }
 
-    /// Enumerates devices that have at least one output channel.
+    /// Enumerates devices that have at least one output channel, minus the
+    /// aggregates.
     private func readAvailableOutputs() -> [OutputDevice] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = Self.devicesAddress
 
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(
@@ -129,11 +122,30 @@ final class SystemVolume {
         ) == noErr else { return [] }
 
         return ids.compactMap { id in
-            guard hasOutputChannels(id), let name = try? id.readString(kAudioObjectPropertyName) else {
+            guard hasOutputChannels(id),
+                  !isAggregate(id),
+                  let name = try? id.readString(kAudioObjectPropertyName) else {
                 return nil
             }
             return OutputDevice(id: id, name: name)
         }
+    }
+
+    /// True for aggregate devices, which is how Sonora's own aggregate is kept
+    /// out of the picker.
+    ///
+    /// The engine builds it with `kAudioAggregateDeviceIsPrivateKey`, which
+    /// hides it from other processes but not from this one, and this scan runs
+    /// in the process that created it. Offering it as an output would rebuild
+    /// the audio path around the device that rebuild is about to destroy.
+    ///
+    /// A device whose transport cannot be read is kept: a real device missing
+    /// from the picker is worse than one stray entry in it.
+    private func isAggregate(_ device: AudioObjectID) -> Bool {
+        guard let transport = try? device.readUInt32(kAudioDevicePropertyTransportType) else {
+            return false
+        }
+        return transport == kAudioDeviceTransportTypeAggregate
     }
 
     private func hasOutputChannels(_ device: AudioObjectID) -> Bool {
@@ -167,6 +179,12 @@ final class SystemVolume {
     func refresh() {
         removeListeners()
 
+        // On the system object rather than on a device, so the picker still
+        // notices a device arriving, leaving, or becoming the default when the
+        // engine's own state has not changed and it therefore reports nothing.
+        addSystemListener(address: Self.defaultOutputDeviceAddress)
+        addSystemListener(address: Self.devicesAddress)
+
         guard let device = try? AudioObjectID.readDefaultOutputDevice() else {
             deviceID = .unknown
             outputDeviceName = "No output device"
@@ -197,6 +215,30 @@ final class SystemVolume {
         listeners.append((device, address, block))
     }
 
+    /// Observes a system-wide property.
+    ///
+    /// These fire for changes nothing else here would learn about, so they
+    /// re-read the device and the list rather than only reporting, and the
+    /// report then goes out through `onChange` at the end of `refresh()` like
+    /// every other one. Registering again from inside `refresh()` is safe:
+    /// `refresh()` removes every listener first, and these are recorded in the
+    /// same list as the rest, so they cannot stack up.
+    private func addSystemListener(address: AudioObjectPropertyAddress) {
+        var mutableAddress = address
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor in self?.refresh() }
+        }
+
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID.system, &mutableAddress, queue, block
+        )
+        guard status == noErr else {
+            logger.error("Could not observe system audio property: \(status, privacy: .public)")
+            return
+        }
+        listeners.append((AudioObjectID.system, address, block))
+    }
+
     private func removeListeners() {
         for (device, address, block) in listeners {
             var mutableAddress = address
@@ -214,6 +256,18 @@ final class SystemVolume {
     private static let muteAddress = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyMute,
         mScope: kAudioDevicePropertyScopeOutput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    private static let defaultOutputDeviceAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    private static let devicesAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
 }

@@ -196,6 +196,42 @@ struct SettingsStoreTests {
         #expect(FileManager.default.fileExists(atPath: store.fileURL.path))
     }
 
+    @Test("a schema 1 file that cannot decode is corrupt, not stale")
+    func undecodableSchemaOneFileIsCorrupt() throws {
+        let directory = try makeTemporaryDirectory()
+        let store = SettingsStore(directory: directory)
+
+        // Hand written, like the readable schema 1 file above, for the same
+        // reason: encoding a `Settings` could only ever produce a valid one.
+        // The second band is missing `q`, so the decode fails on a file whose
+        // schema this build still reads. That makes it a broken file rather
+        // than an old one, and broken files are quarantined.
+        let payload = """
+        {
+          "schemaVersion": 1,
+          "isBypassed": false,
+          "preampDecibels": 0,
+          "bands": [
+            {"kind": "peaking", "frequency": 32, "q": 1.41, "gainDecibels": 0},
+            {"kind": "peaking", "frequency": 64, "gainDecibels": 0}
+          ],
+          "activePresetID": "builtin.flat",
+          "userPresets": []
+        }
+        """
+        try Data(payload.utf8).write(to: store.fileURL)
+
+        #expect(store.load() == Settings.defaults)
+
+        guard case .corrupt(let backupURL) = store.lastLoadFailure else {
+            Issue.record("expected a corrupt failure, got \(String(describing: store.lastLoadFailure))")
+            return
+        }
+        let backup = try #require(backupURL, "the file should have been quarantined")
+        #expect(FileManager.default.fileExists(atPath: backup.path))
+        #expect(FileManager.default.fileExists(atPath: store.fileURL.path) == false)
+    }
+
     @Test("saving creates the directory if it does not exist")
     func createsDirectory() throws {
         let directory = FileManager.default.temporaryDirectory
