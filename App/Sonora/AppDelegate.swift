@@ -9,7 +9,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let engine = AudioEngineController(
         settingsStore: SettingsStore(directory: SettingsStore.defaultDirectory())
     )
-    private lazy var menuController = StatusMenuController(engine: engine)
+    private let volume = SystemVolume()
+
+    private lazy var model = PanelModel(engine: engine, volume: volume)
+    private lazy var panelController = PanelController(model: model)
+    private lazy var menuController = StatusMenuController(panelController: panelController)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -23,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        panelController.close()
         engine.stop()
     }
 }
