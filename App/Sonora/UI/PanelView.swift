@@ -83,8 +83,16 @@ struct PanelView: View {
                             : AnyShapeStyle(.secondary)
                     )
             }
-            Slider(value: $model.preampDecibels, in: Self.gainRange)
-                .accessibilityLabel("Preamp")
+            // The same control the bands use, laid on its side: the preamp is
+            // a gain over the same range with the same neutral 0 dB, so it
+            // fills out of the centre rather than out of its minimum. The
+            // system volume slider above stays a stock `Slider` on purpose,
+            // because 0 to 1 has no neutral point to fill from.
+            GainSlider(
+                axis: .horizontal,
+                gain: $model.preampDecibels,
+                accessibilityLabel: "Preamp"
+            )
         }
     }
 
@@ -111,23 +119,16 @@ struct PanelView: View {
         }
     }
 
-    /// The preset section. The caption names what the menu and the pills below
-    /// it are, which is what keeps "Flat" reading as one preset among several
-    /// rather than as a command; the reset button that used to repeat it in the
-    /// footer is gone.
+    /// The preset section. It carries its own heading, on the same line as the
+    /// menu it opens, the way the preamp above puts its label and its value on
+    /// one line.
     private var presets: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Presets")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-
-            PresetPicker(
-                presets: model.presets,
-                recentPresets: model.recentPresets,
-                activeID: model.activePresetID,
-                onSelect: model.selectPreset
-            )
-        }
+        PresetPicker(
+            presets: model.presets,
+            recentPresets: model.recentPresets,
+            activeID: model.activePresetID,
+            onSelect: model.selectPreset
+        )
     }
 
     private var footer: some View {

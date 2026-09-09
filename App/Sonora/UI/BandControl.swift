@@ -12,48 +12,67 @@ enum BandMetrics {
 
     /// Width of one band control. Ten of these is 260 points, which leaves 72
     /// points for the nine gaps inside the panel's 332 points of content width.
+    ///
+    /// It is also the thickness of the preamp's row, so the horizontal control
+    /// gives a pointer the same margin around its handle that a band does.
     static let controlWidth: Double = 26
 
-    /// Height of the handle. The groove is shortened by this much so the handle
-    /// travels between the groove's ends instead of past them.
+    /// The handle's extent along the axis it travels. The groove is shortened
+    /// by this much so the handle travels between the groove's ends instead of
+    /// past them.
     static let handleHeight: Double = 9
-
-    /// Distance in points from the zero line to a full boost or full cut.
-    static let travel: Double = (trackHeight - handleHeight) / 2
 
     /// How far the curve must stay clear of the top and bottom edges to reach
     /// full scale at the same height as a handle at full scale.
     static let curveInset: Double = handleHeight / 2
 }
 
-/// One band's gain, drawn as a fill that grows out of the centre.
+/// One gain, drawn as a fill that grows out of the centre, in either
+/// orientation.
 ///
-/// A stock `Slider` fills from its minimum, so a band sitting at 0 dB shows a
-/// half filled track and the whole equalizer reads as boosted when it is flat.
-/// This control anchors the fill at 0 dB instead: no gain, no fill; a boost
-/// grows up from the line, a cut grows down from it.
+/// A stock `Slider` fills from its minimum, so a value sitting at 0 dB shows a
+/// half filled track and reads as boosted when it is flat. This control anchors
+/// the fill at 0 dB instead: no gain, no fill; a boost grows out of the line
+/// one way and a cut grows out of it the other.
+///
+/// The ten bands run vertically and the preamp runs horizontally, and they are
+/// one control because they are one quantity: a signed gain over
+/// `EqualizerBand.gainRange`, centred on a neutral 0 dB. Drawing them twice
+/// would be two chances to disagree about what neutral looks like.
 ///
 /// It is a custom control, so the keyboard support a `Slider` gave for free is
-/// rebuilt here: the column takes focus, the arrow keys step it, and VoiceOver
-/// gets the same label and value plus an adjustable action.
-struct BandControl: View {
+/// rebuilt here: it takes focus, the arrow keys along its own axis step it, and
+/// VoiceOver gets a label and a value plus an adjustable action.
+struct GainSlider: View {
 
-    let frequency: Double
+    /// Which way the control runs. A vertical control grows a boost upward; a
+    /// horizontal one grows it to the right.
+    let axis: Axis
 
     @Binding var gain: Double
+
+    /// What this control is called, for VoiceOver. The bands name their
+    /// frequency and the preamp names itself.
+    let accessibilityLabel: String
 
     @Environment(\.colorScheme) private var colorScheme
 
     @FocusState private var isFocused: Bool
 
     /// The gain the drag started from. Non-nil only while a drag is in flight,
-    /// which is what makes the drag relative to where the band was grabbed
+    /// which is what makes the drag relative to where the control was grabbed
     /// rather than jumping the value to wherever the pointer landed.
     @State private var gainAtDragStart: Double?
 
     private static let range = EqualizerBand.gainRange
-    private static let grooveWidth: Double = 5
-    private static let handleWidth: Double = 20
+
+    /// The groove's thickness across the axis.
+    private static let grooveThickness: Double = 5
+
+    /// The handle's extent across the axis. Along the axis it is
+    /// `BandMetrics.handleHeight`, which is the figure the curve's inset is
+    /// measured from, so the handle and the curve stay tied to one number.
+    private static let handleBreadth: Double = 20
 
     /// One arrow key press. Whole decibels, so stepping always lands on the
     /// round numbers and 0 dB is reachable from the keyboard exactly.
@@ -69,45 +88,54 @@ struct BandControl: View {
     private static let magnitude = max(abs(range.lowerBound), abs(range.upperBound))
 
     var body: some View {
-        ZStack {
-            Capsule()
-                .fill(.quaternary)
-                .frame(width: Self.grooveWidth, height: BandMetrics.trackHeight - BandMetrics.handleHeight)
+        // A band column's length is fixed, but the preamp's comes from the
+        // panel's width, so the length along the axis is measured rather than
+        // assumed and every offset below is derived from it.
+        GeometryReader { proxy in
+            let travel = travel(forLength: axis == .vertical ? proxy.size.height : proxy.size.width)
 
-            Capsule()
-                .fill(Color.accentColor)
-                .frame(width: Self.grooveWidth, height: fillLength)
-                .offset(y: fillOffset)
+            ZStack {
+                groove(travel: travel)
 
-            handle
-                .offset(y: handleOffset)
+                fill(travel: travel)
+                    // The fill runs from the zero line to the handle, so its
+                    // centre is half way between the two.
+                    .offset(displacement(along: normalised * travel / 2))
+
+                handle
+                    .offset(displacement(along: normalised * travel))
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            // The whole control is draggable, not just the handle, so a value
+            // can be set without first hitting the handle itself.
+            .contentShape(Rectangle())
+            .gesture(drag(travel: travel))
         }
-        .frame(width: BandMetrics.controlWidth, height: BandMetrics.trackHeight)
-        // The whole column is draggable, not just the handle, so a band can be
-        // set without first hitting a 20 by 9 point target.
-        .contentShape(Rectangle())
+        .frame(
+            width: axis == .vertical ? BandMetrics.controlWidth : nil,
+            height: axis == .vertical ? BandMetrics.trackHeight : BandMetrics.controlWidth
+        )
         .overlay {
             if isFocused {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .strokeBorder(Color(nsColor: .keyboardFocusIndicatorColor), lineWidth: 2)
             }
         }
-        .gesture(drag)
         .focusable()
         .focused($isFocused)
-        // The ring above is drawn to fit this column; the system's own effect
+        // The ring above is drawn to fit this control; the system's own effect
         // would sit around the same rectangle a second time.
         .focusEffectDisabled()
-        .onKeyPress(.upArrow) {
+        .onKeyPress(incrementKey) {
             adjust(by: Self.keyboardStep)
             return .handled
         }
-        .onKeyPress(.downArrow) {
+        .onKeyPress(decrementKey) {
             adjust(by: -Self.keyboardStep)
             return .handled
         }
         .accessibilityElement()
-        .accessibilityLabel(Self.label(for: frequency))
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityValue(Self.value(for: gain))
         .accessibilityAdjustableAction { direction in
             switch direction {
@@ -118,31 +146,88 @@ struct BandControl: View {
         }
     }
 
+    // MARK: - Parts
+
+    private func groove(travel: Double) -> some View {
+        let size = size(along: travel * 2, across: Self.grooveThickness)
+        return Capsule()
+            .fill(.quaternary)
+            .frame(width: size.width, height: size.height)
+    }
+
+    private func fill(travel: Double) -> some View {
+        let size = size(along: abs(normalised) * travel, across: Self.grooveThickness)
+        return Capsule()
+            .fill(Color.accentColor)
+            .frame(width: size.width, height: size.height)
+    }
+
     /// A light chip in both appearances, the way an AppKit slider knob is.
     /// Naming an appearance-reactive control colour instead would make the
     /// handle dark on a dark panel, where it would sink into the groove rather
     /// than sit on top of it.
     private var handle: some View {
-        RoundedRectangle(cornerRadius: 3, style: .continuous)
+        let size = size(along: BandMetrics.handleHeight, across: Self.handleBreadth)
+        return RoundedRectangle(cornerRadius: 3, style: .continuous)
             .fill(colorScheme == .dark ? Color(white: 0.78) : Color(white: 0.99))
             .overlay(
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .strokeBorder(Color.black.opacity(colorScheme == .dark ? 0.30 : 0.16), lineWidth: 0.5)
             )
-            .frame(width: Self.handleWidth, height: BandMetrics.handleHeight)
+            .frame(width: size.width, height: size.height)
             .shadow(color: .black.opacity(colorScheme == .dark ? 0.40 : 0.18), radius: 1, y: 0.5)
     }
 
-    private var drag: some Gesture {
+    // MARK: - Axis
+
+    /// Turns a measurement along and across the axis into a frame.
+    private func size(along length: Double, across breadth: Double) -> CGSize {
+        axis == .vertical
+            ? CGSize(width: breadth, height: length)
+            : CGSize(width: length, height: breadth)
+    }
+
+    /// Turns a signed displacement along the axis into an offset. A positive
+    /// displacement is a boost, which is upward on a vertical control, and
+    /// SwiftUI's y axis grows downward, which is where the sign comes from.
+    private func displacement(along value: Double) -> CGSize {
+        axis == .vertical
+            ? CGSize(width: 0, height: -value)
+            : CGSize(width: value, height: 0)
+    }
+
+    /// Distance in points from the zero line to a full boost or full cut.
+    private func travel(forLength length: Double) -> Double {
+        max((length - BandMetrics.handleHeight) / 2, 0)
+    }
+
+    private var incrementKey: KeyEquivalent {
+        axis == .vertical ? .upArrow : .rightArrow
+    }
+
+    private var decrementKey: KeyEquivalent {
+        axis == .vertical ? .downArrow : .leftArrow
+    }
+
+    // MARK: - Value
+
+    private func drag(travel: Double) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 let start = gainAtDragStart ?? gain
                 gainAtDragStart = start
 
+                // A control with no room to travel would divide by zero, and
+                // there is no value a drag on it could mean anyway.
+                guard travel > 0 else { return }
+
                 // Pointer motion maps 1:1 onto the track: a point of travel is
-                // always the same number of decibels, up or down.
-                let decibelsPerPoint = Self.magnitude / BandMetrics.travel
-                gain = Self.settled(start - Double(value.translation.height) * decibelsPerPoint)
+                // always the same number of decibels, either way.
+                let decibelsPerPoint = Self.magnitude / travel
+                let movement = axis == .vertical
+                    ? -Double(value.translation.height)
+                    : Double(value.translation.width)
+                gain = Self.settled(start + movement * decibelsPerPoint)
             }
             .onEnded { _ in
                 gainAtDragStart = nil
@@ -156,24 +241,8 @@ struct BandControl: View {
         return min(max(gain / Self.magnitude, -1), 1)
     }
 
-    /// Vertical offset of the handle's centre from the zero line. Negative is
-    /// up, because SwiftUI's y axis grows downward.
-    private var handleOffset: Double {
-        -normalised * BandMetrics.travel
-    }
-
-    private var fillLength: Double {
-        abs(normalised) * BandMetrics.travel
-    }
-
-    /// The fill runs from the zero line to the handle, so its centre is half
-    /// way between the two.
-    private var fillOffset: Double {
-        handleOffset / 2
-    }
-
     private func adjust(by delta: Double) {
-        // Round onto the step grid first, so a band left at 3.4 dB by a drag
+        // Round onto the step grid first, so a control left at 3.4 dB by a drag
         // steps to 4 rather than to 4.4 and keeps drifting off the round
         // numbers for the rest of the session.
         let steps = (gain / Self.keyboardStep).rounded()
@@ -185,13 +254,29 @@ struct BandControl: View {
         return abs(clamped) < zeroDetent ? 0 : clamped
     }
 
+    private static func value(for gain: Double) -> String {
+        String(format: "%+.1f decibels", gain)
+    }
+}
+
+/// One band's gain: a vertical `GainSlider` that knows its frequency.
+struct BandControl: View {
+
+    let frequency: Double
+
+    @Binding var gain: Double
+
+    var body: some View {
+        GainSlider(
+            axis: .vertical,
+            gain: $gain,
+            accessibilityLabel: Self.label(for: frequency)
+        )
+    }
+
     private static func label(for frequency: Double) -> String {
         frequency >= 1_000
             ? "\(Int(frequency / 1_000)) kilohertz band"
             : "\(Int(frequency)) hertz band"
-    }
-
-    private static func value(for gain: Double) -> String {
-        String(format: "%+.1f decibels", gain)
     }
 }

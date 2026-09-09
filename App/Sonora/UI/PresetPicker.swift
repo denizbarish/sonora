@@ -1,8 +1,9 @@
 import SonoraProfiles
 import SwiftUI
 
-/// The preset picker: a pop-up menu carrying every preset, with a short row of
-/// one-click pills beneath it for the three used most recently.
+/// The preset section: a heading and the menu that opens the full catalogue on
+/// one line, with a short row of one-click shortcuts to the three presets used
+/// most recently beneath them.
 ///
 /// The split is what lets the list grow. Seven built-ins already overflow a
 /// single row, and user presets and a headphone-correction library are still to
@@ -10,8 +11,10 @@ import SwiftUI
 /// row of pills cannot. The pills exist so the common case, re-picking
 /// something used minutes ago, stays a single click.
 ///
-/// The menu is the complete list and the pills are a shortcut into it, so both
-/// lead to the same `onSelect`, and the active preset is marked in both places.
+/// Each part has one job. The menu is the way into the catalogue, so it is
+/// labelled for what it opens rather than for what is selected; the pills say
+/// which preset is active. The checkmark inside the menu stays, because that is
+/// where a list of choices has to mark the current one.
 struct PresetPicker: View {
 
     /// Every preset, in declared order. The menu shows all of them.
@@ -26,15 +29,34 @@ struct PresetPicker: View {
 
     let onSelect: (Preset) -> Void
 
-    /// The gap between pills, and the figure the equal-width split assumes.
+    /// The gap between pills, and the figure the width cap below assumes.
     private static let pillSpacing: CGFloat = 6
 
-    /// What the menu button reads when the curve matches no named preset.
-    private static let customStateName = "Custom"
+    /// The widest a single pill may become. A pill takes its natural width, so
+    /// short names sit in short capsules and the row reads as a handful of
+    /// shortcuts rather than as a segmented control; the cap is what guarantees
+    /// three of them can never overflow the panel. Three capped pills and two
+    /// gaps come to 330 points inside the 332 points of content width, so even
+    /// three long names stay inside it. "Laptop Speaker" and "Treble Boost",
+    /// the longest built-in names, are well under the cap and are not
+    /// truncated; the cap is there for the user presets and correction curves
+    /// that will be longer. A name that does reach it truncates at the tail and
+    /// keeps its full text in the tooltip and the accessibility label, so
+    /// nothing is ever lost, only shortened.
+    private static let maximumPillWidth: CGFloat = 106
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            menu
+            HStack(spacing: 8) {
+                Text("Presets")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                menu
+            }
+
             pillRow
         }
     }
@@ -48,6 +70,10 @@ struct PresetPicker: View {
     /// changing from an ungrouped list into a grouped one, so nothing the user
     /// has already learned about this menu moves.
     ///
+    /// The button names the catalogue it opens instead of the active preset.
+    /// Naming the active preset here said the same thing the pills below
+    /// already say, a few points apart, and made a way in look like a value.
+    ///
     /// `Toggle` rather than `Button` because in a menu SwiftUI draws a toggle
     /// as a checkmark item, which is the native way a macOS menu says "this one
     /// is the current choice" and is also what VoiceOver reads back as a state.
@@ -59,14 +85,13 @@ struct PresetPicker: View {
                 }
             }
         } label: {
-            Text(activeName)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            Text("All Presets")
         }
         .controlSize(.small)
-        .frame(maxWidth: .infinity)
-        .accessibilityLabel("Preset")
-        .accessibilityValue(activeName)
+        // Sized to its label, at the panel's trailing edge, so it lines up with
+        // the preamp's value above it instead of stretching across the panel.
+        .fixedSize()
+        .accessibilityLabel("All Presets")
         .help("Choose a preset")
     }
 
@@ -83,27 +108,17 @@ struct PresetPicker: View {
         )
     }
 
-    private var activeName: String {
-        presets.first { $0.id == activeID }?.name ?? Self.customStateName
-    }
-
     // MARK: - Pills
 
-    /// The three most recent presets, sharing the row in equal thirds.
-    ///
-    /// Equal thirds rather than intrinsic widths so the row is exactly the
-    /// panel's width by construction: with 332 points of usable width and two
-    /// 6-point gaps, each pill gets a little over 106 points whatever the names
-    /// happen to be. A name too long for that truncates at the tail and keeps
-    /// its full text in the tooltip and in the accessibility label, so nothing
-    /// is ever lost, only shortened. None of the current built-ins reach that
-    /// limit, including "Laptop Speaker"; the rule is there for the user
-    /// presets and correction curves that will.
+    /// The three most recent presets, each at its natural width, packed against
+    /// the leading edge under the heading.
     private var pillRow: some View {
         HStack(spacing: Self.pillSpacing) {
             ForEach(recentPresets) { preset in
                 pill(for: preset)
             }
+
+            Spacer(minLength: 0)
         }
         .controlSize(.small)
         .buttonBorderShape(.capsule)
@@ -131,12 +146,10 @@ struct PresetPicker: View {
             Text(preset.name)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                // On the label as well as on the button: the button style
-                // stretches its background to the frame, but the text inside
-                // stays at its natural width and drifts off centre without it.
-                .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity)
+        // A cap, not a width: the pill shrinks to its name and only stops
+        // growing when a long one would push the row past the panel.
+        .frame(maxWidth: Self.maximumPillWidth)
         // The label may be truncated, so the name is stated in full for both
         // VoiceOver and the tooltip rather than read off the visible glyphs.
         .accessibilityLabel(preset.name)
