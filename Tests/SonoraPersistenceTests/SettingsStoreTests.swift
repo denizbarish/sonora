@@ -24,6 +24,59 @@ struct SettingsStoreTests {
         #expect(settings.bands == EqualizerBand.graphicDefaults)
         #expect(settings.activePresetID == BuiltInPresets.flat.id)
         #expect(settings.userPresets.isEmpty)
+        #expect(settings.recentPresetIDs.isEmpty)
+    }
+
+    @Test("a schema 1 file predating recent presets still loads")
+    func schemaOneFileWithoutRecentPresets() throws {
+        let directory = try makeTemporaryDirectory()
+        let store = SettingsStore(directory: directory)
+
+        // Written out by hand rather than by encoding a `Settings`: encoding one
+        // would always produce today's keys, so it could never stand in for a
+        // file that predates them, which is the whole point of this test.
+        let payload = """
+        {
+          "schemaVersion": 1,
+          "isBypassed": true,
+          "preampDecibels": -3,
+          "bands": [
+            {"kind": "peaking", "frequency": 32, "q": 1.41, "gainDecibels": 6},
+            {"kind": "peaking", "frequency": 64, "q": 1.41, "gainDecibels": -2}
+          ],
+          "activePresetID": "builtin.bass-boost",
+          "userPresets": []
+        }
+        """
+        try Data(payload.utf8).write(to: store.fileURL)
+
+        let loaded = store.load()
+
+        // Not corrupt, not stale: an old file is readable, so it is read.
+        #expect(store.lastLoadFailure == nil)
+        #expect(loaded.isBypassed)
+        #expect(loaded.preampDecibels == -3)
+        #expect(loaded.bands.map(\.gainDecibels) == [6, -2])
+        #expect(loaded.activePresetID == "builtin.bass-boost")
+        // No key means nothing has been used yet, not a broken file.
+        #expect(loaded.recentPresetIDs.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: store.fileURL.path))
+    }
+
+    @Test("recently used presets survive a round trip in order")
+    func recentPresetsRoundTrip() throws {
+        let store = SettingsStore(directory: try makeTemporaryDirectory())
+
+        var settings = Settings.defaults
+        settings.recentPresetIDs = [
+            BuiltInPresets.vocal.id, BuiltInPresets.flat.id, BuiltInPresets.bassBoost.id,
+        ]
+
+        try store.save(settings)
+
+        let loaded = store.load()
+        #expect(store.lastLoadFailure == nil)
+        #expect(loaded.recentPresetIDs == settings.recentPresetIDs)
     }
 
     @Test("loading from an empty directory returns defaults")

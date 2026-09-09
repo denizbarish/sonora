@@ -71,8 +71,19 @@ final class AudioEngineController {
     }
 
     /// Records which preset the user picked, alongside the bands it produced.
+    ///
+    /// Picking one also moves it to the front of the recent list. A nil
+    /// identifier means a slider moved and the curve is no longer any named
+    /// preset: that clears the selection but leaves the recent list alone,
+    /// because the user did reach for that preset a moment ago.
     func setActivePresetID(_ id: String?) {
         settings.activePresetID = id
+        if let id {
+            var recent = settings.recentPresetIDs
+            recent.removeAll { $0 == id }
+            recent.insert(id, at: 0)
+            settings.recentPresetIDs = Array(recent.prefix(Settings.maximumRecentPresets))
+        }
         do {
             try settingsStore.save(settings)
         } catch {
@@ -81,6 +92,9 @@ final class AudioEngineController {
     }
 
     var activePresetID: String? { settings.activePresetID }
+
+    /// Identifiers of the presets the user picked, most recent first.
+    var recentPresetIDs: [String] { settings.recentPresetIDs }
 
     func start() {
         guard state != .running else { return }

@@ -52,11 +52,20 @@ final class PanelModel {
         }
     }
 
+    /// The presets to offer as one-tap pills, most recently used first.
+    ///
+    /// Padded with the first built-ins until the user has actually used three,
+    /// so the row is never empty on a fresh install.
+    private(set) var recentPresets: [Preset] = []
+
     private(set) var activePresetID: String?
     private(set) var outputDeviceName: String
     private(set) var availableOutputs: [SystemVolume.OutputDevice] = []
     private(set) var stateDescription: String
     private(set) var isRunning: Bool
+
+    /// How many pills the row offers.
+    private static let recentPresetCount = 3
 
     private let engine: AudioEngineController
     private let volume: SystemVolume
@@ -76,6 +85,7 @@ final class PanelModel {
         self.availableOutputs = volume.availableOutputs
         self.stateDescription = Self.describe(engine.state)
         self.isRunning = engine.state == .running
+        refreshRecentPresets()
 
         engine.onStateChange = { [weak self] state in
             Task { @MainActor in self?.engineStateChanged(state) }
@@ -109,6 +119,7 @@ final class PanelModel {
 
         activePresetID = preset.id
         engine.setActivePresetID(preset.id)
+        refreshRecentPresets()
         publish()
     }
 
@@ -122,6 +133,27 @@ final class PanelModel {
 
     func retry() {
         engine.retry()
+    }
+
+    /// Rebuilds `recentPresets` from what the engine remembers.
+    ///
+    /// The engine stores identifiers, which outlive the presets they name, so
+    /// anything that no longer matches a known preset is dropped rather than
+    /// shown as a dead pill.
+    private func refreshRecentPresets() {
+        let knownPresets = Dictionary(
+            presets.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        let used = engine.recentPresetIDs.compactMap { knownPresets[$0] }
+
+        var result: [Preset] = []
+        var seen: Set<String> = []
+        for preset in used + presets where result.count < Self.recentPresetCount {
+            if seen.insert(preset.id).inserted {
+                result.append(preset)
+            }
+        }
+        recentPresets = result
     }
 
     private func bands() -> [EqualizerBand] {
