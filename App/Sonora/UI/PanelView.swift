@@ -111,17 +111,19 @@ struct PanelView: View {
         }
     }
 
-    /// The preset row. The caption names what the pills are, which is what
-    /// keeps "Flat" reading as one preset among several rather than as a
-    /// command; the reset button that used to repeat it in the footer is gone.
+    /// The preset section. The caption names what the menu and the pills below
+    /// it are, which is what keeps "Flat" reading as one preset among several
+    /// rather than as a command; the reset button that used to repeat it in the
+    /// footer is gone.
     private var presets: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Presets")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
-            PresetStrip(
+            PresetPicker(
                 presets: model.presets,
+                recentPresets: model.recentPresets,
                 activeID: model.activePresetID,
                 onSelect: model.selectPreset
             )
