@@ -228,6 +228,11 @@ public enum EqualizerCurve {
         count: Int
     ) -> [CurvePoint] {
         guard count > 0 else { return [] }
+
+        // A non-positive bound makes the ratio below NaN or infinite, and every
+        // frequency after the first comes out NaN.
+        guard lowest > 0, highest > 0 else { return [] }
+
         guard count > 1 else {
             return [
                 CurvePoint(
@@ -568,7 +573,13 @@ final class PanelModel {
     let presets: [Preset] = BuiltInPresets.all
 
     var systemVolume: Float {
-        didSet { volume.scalar = systemVolume }
+        didSet {
+            // The device's own listener writes back into this property, so
+            // without a guard the two chase each other and the slider jitters
+            // under the hand that is dragging it.
+            guard abs(systemVolume - volume.scalar) > 0.001 else { return }
+            volume.scalar = systemVolume
+        }
     }
 
     var preampDecibels: Double {
@@ -849,16 +860,21 @@ struct BandSliders: View {
     @Binding var gains: [Double]
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 6) {
+        HStack(alignment: .bottom, spacing: 4) {
             ForEach(Array(EqualizerBand.graphicFrequencies.enumerated()), id: \.offset) { index, frequency in
                 VStack(spacing: 4) {
                     Slider(
                         value: binding(for: index),
                         in: EqualizerBand.gainRange
                     )
+                    // Order matters here. `rotationEffect` changes what is
+                    // drawn, not what is laid out: the slider still occupies
+                    // its natural horizontal length. So the first frame sets
+                    // that length, the rotation stands it upright, and the
+                    // second frame reserves the upright footprint.
+                    .frame(width: 104)
                     .rotationEffect(.degrees(-90))
-                    .frame(width: 90, height: 20)
-                    .frame(height: 110)
+                    .frame(width: 22, height: 104)
                     .accessibilityLabel(Self.label(for: frequency))
                     .accessibilityValue(Self.value(for: gains[safe: index] ?? 0))
 
@@ -1083,7 +1099,15 @@ struct PanelView: View {
                     .monospacedDigit()
                     // Above unity the limiter starts doing real work, so the
                     // number says so rather than leaving it to be discovered.
-                    .foregroundStyle(model.preampDecibels > 0 ? .orange : .secondary)
+                    //
+                    // Wrapped in AnyShapeStyle because the two branches are
+                    // different types, Color and HierarchicalShapeStyle, and
+                    // the type checker cannot unify them in a ternary.
+                    .foregroundStyle(
+                        model.preampDecibels > 0
+                            ? AnyShapeStyle(.orange)
+                            : AnyShapeStyle(.secondary)
+                    )
             }
             Slider(value: $model.preampDecibels, in: Self.gainRange)
                 .accessibilityLabel("Preamp")
@@ -1108,7 +1132,11 @@ struct PanelView: View {
         HStack {
             Text(model.stateDescription)
                 .font(.system(size: 10))
-                .foregroundStyle(model.isRunning ? .secondary : .orange)
+                .foregroundStyle(
+                    model.isRunning
+                        ? AnyShapeStyle(.secondary)
+                        : AnyShapeStyle(.orange)
+                )
                 .lineLimit(1)
 
             Spacer()

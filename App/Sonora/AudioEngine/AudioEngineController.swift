@@ -28,6 +28,15 @@ final class AudioEngineController {
 
     var onStateChange: ((State) -> Void)?
 
+    /// Called after the audio path has been rebuilt around a different output
+    /// device.
+    ///
+    /// Separate from `onStateChange` because a device change does not change
+    /// the state: the engine was running before it and is running after it, so
+    /// that callback never fires and whoever is showing the device name would
+    /// otherwise keep showing the old one.
+    var onOutputDeviceChange: (() -> Void)?
+
     private let settingsStore: SettingsStore
     private let bridge: ParameterBridge
     private let logger = Logger(subsystem: "com.sonora.Sonora", category: "Engine")
@@ -40,6 +49,15 @@ final class AudioEngineController {
 
     private var settings: Settings
     private var deviceChangeTask: Task<Void, Never>?
+    private var saveTask: Task<Void, Never>?
+    private var hasPendingSave = false
+
+    /// How long after the last change the settings file is written.
+    ///
+    /// Long enough that a drag writes once when the hand stops rather than on
+    /// every frame, short enough that any ordinary way of leaving the app
+    /// reaches the write first.
+    private static let saveDelay: Duration = .milliseconds(400)
 
     init(settingsStore: SettingsStore) {
         self.settingsStore = settingsStore
@@ -57,22 +75,64 @@ final class AudioEngineController {
     var parameters: EngineParameters { bridge.current }
 
     /// Publishes new parameters and persists them.
+    ///
+    /// The publish is immediate, because it is the real-time path and the point
+    /// of the panel. The write is not: see `scheduleSave()`.
     func update(_ parameters: EngineParameters) {
         bridge.publish(parameters)
 
         settings.isBypassed = parameters.isBypassed
         settings.preampDecibels = parameters.preampDecibels
         settings.bands = parameters.bands
-        do {
-            try settingsStore.save(settings)
-        } catch {
-            logger.error("Could not save settings: \(error.localizedDescription, privacy: .public)")
-        }
+        scheduleSave()
     }
 
     /// Records which preset the user picked, alongside the bands it produced.
+    ///
+    /// Picking one also moves it to the front of the recent list. A nil
+    /// identifier means a slider moved and the curve is no longer any named
+    /// preset: that clears the selection but leaves the recent list alone,
+    /// because the user did reach for that preset a moment ago.
     func setActivePresetID(_ id: String?) {
         settings.activePresetID = id
+        if let id {
+            var recent = settings.recentPresetIDs
+            recent.removeAll { $0 == id }
+            recent.insert(id, at: 0)
+            settings.recentPresetIDs = Array(recent.prefix(Settings.maximumRecentPresets))
+        }
+        scheduleSave()
+    }
+
+    /// Writes the settings file a little after the last change instead of on
+    /// every one.
+    ///
+    /// `bandGains` publishes from `didSet`, so a drag arrives here once per
+    /// frame, and `SettingsStore.save` pretty-prints the whole file and writes
+    /// it atomically: a temporary file and a rename, on the main actor, per
+    /// frame. The in-memory `settings` is already current by the time this is
+    /// called, so only the write is deferred.
+    private func scheduleSave() {
+        hasPendingSave = true
+        saveTask?.cancel()
+        saveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.saveDelay)
+            guard !Task.isCancelled else { return }
+            self?.writePendingSave()
+        }
+    }
+
+    /// Writes whatever the debounce is still holding, right now.
+    private func flushPendingSave() {
+        saveTask?.cancel()
+        saveTask = nil
+        writePendingSave()
+    }
+
+    private func writePendingSave() {
+        guard hasPendingSave else { return }
+        hasPendingSave = false
+
         do {
             try settingsStore.save(settings)
         } catch {
@@ -81,6 +141,9 @@ final class AudioEngineController {
     }
 
     var activePresetID: String? { settings.activePresetID }
+
+    /// Identifiers of the presets the user picked, most recent first.
+    var recentPresetIDs: [String] { settings.recentPresetIDs }
 
     func start() {
         guard state != .running else { return }
@@ -99,6 +162,10 @@ final class AudioEngineController {
     }
 
     func stop() {
+        // Before anything else: quitting must not lose the last change, and
+        // `AppDelegate.applicationWillTerminate` gets here.
+        flushPendingSave()
+
         watcher?.stop()
         watcher = nil
         deviceChangeTask?.cancel()
@@ -197,6 +264,10 @@ final class AudioEngineController {
         // A fresh tap object: the old one belonged to the torn down aggregate.
         tap = ProcessTap()
         buildAudioPath()
+
+        // After the rebuild, so anyone reading the current device reads the one
+        // the engine actually settled on.
+        onOutputDeviceChange?()
     }
 
     /// Tries to leave bypass and run again. Called from the menu.
