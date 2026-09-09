@@ -32,7 +32,19 @@ public final class ParameterBridge: @unchecked Sendable {
     private var sampleRate: Double
 
     /// Even means settled, odd means a write is in flight.
-    private let sequence = ManagedAtomic<Int>(0)
+    ///
+    /// `UnsafeAtomic` rather than `ManagedAtomic`, matching `DSPChain`: the
+    /// latter is a non-final class, so every access on the render path costs a
+    /// metadata load and an indirect call, plus retain traffic in unoptimised
+    /// builds.
+    private let sequence: UnsafeAtomic<Int>
+
+    /// Copies the render thread threw away because a write overlapped them.
+    ///
+    /// Bookkeeping, not behaviour. A concurrency test that never actually
+    /// interleaved proves nothing, so the test asserts this moved rather than
+    /// trusting that an overlap happened.
+    private let discarded: UnsafeAtomic<Int>
 
     private let payload: UnsafeMutablePointer<Payload>
     private let coefficients: UnsafeMutablePointer<BiquadCoefficients>
@@ -51,6 +63,8 @@ public final class ParameterBridge: @unchecked Sendable {
     public init(initial: EngineParameters = .defaults, sampleRate: Double = 48_000) {
         self.sampleRate = sampleRate
         self.publishedParameters = initial
+        self.sequence = UnsafeAtomic<Int>.create(0)
+        self.discarded = UnsafeAtomic<Int>.create(0)
 
         let capacity = EqualizerChain.maximumBandCount
         payload = UnsafeMutablePointer<Payload>.allocate(capacity: 1)
@@ -64,6 +78,8 @@ public final class ParameterBridge: @unchecked Sendable {
     }
 
     deinit {
+        sequence.destroy()
+        discarded.destroy()
         payload.deinitialize(count: 1)
         payload.deallocate()
         coefficients.deinitialize(count: EqualizerChain.maximumBandCount)
@@ -98,6 +114,11 @@ public final class ParameterBridge: @unchecked Sendable {
         writerLock.unlock()
     }
 
+    /// How many copies were discarded because a write overlapped them.
+    public var discardedCopyCount: Int {
+        discarded.load(ordering: .relaxed)
+    }
+
     /// Applies pending changes to the chain. Real-time thread.
     ///
     /// Costs one atomic load when nothing changed. When something did, copies
@@ -114,10 +135,23 @@ public final class ParameterBridge: @unchecked Sendable {
             scratch[index] = coefficients[index]
         }
 
-        // If the counter moved, the copy above may mix old and new coefficients.
+        // A LoadLoad barrier, then a relaxed re-read. This is the direct
+        // translation of the kernel's `smp_rmb(); read_seqretry()`.
+        //
+        // An acquire load alone is not enough here. Acquire orders what comes
+        // after it, and places no constraint on the copy above sinking past it,
+        // so a coefficient load could be satisfied after this check had already
+        // sampled the pre-write counter. That is precisely the tear this guard
+        // exists to reject.
+        //
+        // If the counter moved, the copy may mix old and new coefficients.
         // Dropping it costs one buffer of staleness; committing it costs an
         // unstable filter.
-        guard sequence.load(ordering: .acquiring) == start else { return }
+        atomicMemoryFence(ordering: .acquiring)
+        guard sequence.load(ordering: .relaxed) == start else {
+            discarded.wrappingIncrement(ordering: .relaxed)
+            return
+        }
 
         chain.applyResolved(
             isBypassed: snapshot.isBypassed,

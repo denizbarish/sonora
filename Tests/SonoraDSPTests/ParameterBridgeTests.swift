@@ -97,8 +97,6 @@ struct ParameterBridgeTests {
         let bridge = ParameterBridge(sampleRate: 48_000)
         let chain = DSPChain(sampleRate: 48_000, channelCount: 2)
 
-        // Two sets whose every band differs, so a torn copy lands on a curve
-        // that matches neither.
         func parameters(gain: Double) -> EngineParameters {
             EngineParameters(
                 isBypassed: false,
@@ -113,33 +111,54 @@ struct ParameterBridgeTests {
         let quiet = parameters(gain: -6)
         let loud = parameters(gain: 6)
 
-        // Reference curves, measured off the audio path.
+        // Reference curves, measured off the audio path. Probed at several
+        // frequencies: both sets are flat across the bands, so a tear confined
+        // to one band barely moves the curve at 1 kHz and would slip through a
+        // single probe.
+        let probes: [Double] = [32, 125, 1_000, 8_000, 16_000]
+
         let quietChain = DSPChain(sampleRate: 48_000, channelCount: 2)
         quiet.apply(to: quietChain)
-        let quietCurve = quietChain.magnitudeDecibels(atFrequency: 1_000)
+        let quietCurve = probes.map { quietChain.magnitudeDecibels(atFrequency: $0) }
 
         let loudChain = DSPChain(sampleRate: 48_000, channelCount: 2)
         loud.apply(to: loudChain)
-        let loudCurve = loudChain.magnitudeDecibels(atFrequency: 1_000)
+        let loudCurve = probes.map { loudChain.magnitudeDecibels(atFrequency: $0) }
 
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                for index in 0..<2_000 {
-                    bridge.publish(index.isMultiple(of: 2) ? quiet : loud)
+        // Rounds, not one shot. The window in which a writer can be caught
+        // mid-update is a few hundred bytes of copying, so a single round can
+        // finish without the two ever overlapping, and a round that never
+        // overlapped proves nothing about tearing.
+        for _ in 0..<40 where bridge.discardedCopyCount == 0 {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    for index in 0..<4_000 {
+                        bridge.publish(index.isMultiple(of: 2) ? quiet : loud)
+                    }
                 }
-            }
-            group.addTask {
-                for _ in 0..<2_000 {
-                    bridge.applyPendingChanges(to: chain)
-                    let curve = chain.magnitudeDecibels(atFrequency: 1_000)
-                    #expect(
-                        abs(curve - quietCurve) < 0.5
-                            || abs(curve - loudCurve) < 0.5
-                            || curve == 0
-                    )
+                group.addTask {
+                    for _ in 0..<4_000 {
+                        bridge.applyPendingChanges(to: chain)
+
+                        for (index, frequency) in probes.enumerated() {
+                            let curve = chain.magnitudeDecibels(atFrequency: frequency)
+                            #expect(
+                                abs(curve - quietCurve[index]) < 0.5
+                                    || abs(curve - loudCurve[index]) < 0.5
+                                    || curve == 0
+                            )
+                        }
+                    }
                 }
             }
         }
+
+        // Without this the test is vacuous: a run where the two tasks never
+        // overlapped looks exactly like a run where the seqlock did its job.
+        #expect(
+            bridge.discardedCopyCount > 0,
+            "the writer and reader never overlapped, so nothing about tearing was exercised"
+        )
     }
 
     @Test("concurrent publishing never loses the final value")
