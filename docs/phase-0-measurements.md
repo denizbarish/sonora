@@ -57,13 +57,18 @@ Run by hand on the machine described above, 2026-09-09.
 | Preset switching clean, no clicks | Pass |
 | Bypass toggles correctly | Not tested separately |
 | Settings survive relaunch | Not tested |
-| Headphone plug survives | Not tested |
+| Headphone plug survives | Pass, audio continued and the equalizer stayed applied |
 | Bluetooth switch survives | Not tested |
 | `kill -9` restores audio | Pass, verified during the latency gate above |
 | No distortion on Loudness at full volume | Not tested |
 | CPU use | Not measured |
 
-The device change checks are the ones still open, and they are the reason the
-device watcher exists: an aggregate device built around a device that has gone
-away stops passing audio with no error at all. Until they are run, that path is
-written but unproven.
+The headphone check was run after review found and fixed a real defect on that
+path: the DSP chain was sized from the tap's channel count, always two, while
+the render loop computed its frame count from the output buffer's. A mono
+output, which is what a Bluetooth headset in HFP mode presents, made the chain
+write past the end of the HAL's buffer on every callback, on the real-time
+thread. The chain is now built for the output format and the render block
+refuses a shape it was not built for.
+
+Still open: Bluetooth specifically, sustained CPU, and Loudness at full volume.
