@@ -164,6 +164,26 @@ final class PanelModel {
         AccessibilityPermission.openSettings()
     }
 
+    /// Re-checks whether the tap is still allowed to run.
+    ///
+    /// `AccessibilityPermission.isTrusted` is a snapshot. Someone can remove
+    /// Sonora from the Accessibility list while it runs, and then the tap stops
+    /// receiving events with no error at all. Without this the checkbox would
+    /// go on claiming the feature is active while the keys had quietly gone
+    /// back to the system.
+    ///
+    /// Called when the panel is about to be shown, which is the only moment the
+    /// answer matters to anyone looking.
+    func refreshVolumeKeyState() {
+        guard capturesVolumeKeys else { return }
+        guard !AccessibilityPermission.isTrusted else { return }
+
+        volumeKeys.stop()
+        capturesVolumeKeys = false
+        engine.setCapturesVolumeKeys(false)
+        volumeKeyProblem = "Sonora is no longer trusted for Accessibility, so the volume keys went back to the system."
+    }
+
     /// Starts or stops the tap, asking for permission when it is needed.
     ///
     /// If the app is still untrusted after asking, the toggle goes back off.

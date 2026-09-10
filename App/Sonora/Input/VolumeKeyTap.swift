@@ -23,7 +23,7 @@ final class VolumeKeyTap {
         var errorDescription: String? {
             switch self {
             case .notTrusted:
-                return "Sonora needs Accessibility permission to use the volume keys."
+                return "Sonora needs Accessibility permission for the volume keys. Grant it, then turn this on again."
             case .tapCreationFailed:
                 return "The volume keys could not be captured."
             }
