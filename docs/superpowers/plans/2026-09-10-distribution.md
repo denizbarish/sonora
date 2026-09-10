@@ -410,7 +410,9 @@ final class VolumeKeyTap {
         guard !isRunning else { return }
         guard AccessibilityPermission.isTrusted else { throw TapError.notTrusted }
 
-        let mask = CGEventMask(1 << CGEventType.systemDefined.rawValue)
+        // CGEventType has no case for system defined events, so the mask comes
+        // from the raw NX_SYSDEFINED value, 14.
+        let mask = CGEventMask(1 << 14)
 
         // The callback cannot capture main-actor state, so it carries an
         // unmanaged pointer to self and hops back to the main actor with the
