@@ -963,6 +963,12 @@ jobs:
       - name: Test
         run: swift test --parallel
 
+      # XcodeGen is not preinstalled on the runner image, and make-dmg.sh calls
+      # it. Verified by searching the runner-images repository: zero hits for
+      # xcodegen, while swiftlint returns its install script.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
       # No signing identity on the runner, so the app inside is ad hoc signed.
       # That is enough for the audio permission, which macOS keys to the
       # binary's hash, and not enough for Gatekeeper, which the README covers.

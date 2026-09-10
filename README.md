@@ -2,7 +2,7 @@
 
 A system-wide audio equalizer and per-app volume mixer for macOS. No driver install, no admin password, no kernel extension.
 
-> **Status: early development.** Nothing is shippable yet. The design is settled and the engine spike is in progress. Follow along, the commit history is the build log.
+> **Status: early, but it works.** The engine and the panel are built and running: system audio goes through a ten band equalizer with presets, and the volume keys can drive it. Not notarised yet, so the first launch needs a right-click; see Install below. The commit history is the build log.
 
 ## Why
 
@@ -30,8 +30,8 @@ Every failure path falls back to bypass, which destroys the tap and returns audi
 
 | Phase | What |
 |---|---|
-| 0 | Engine spike: tap, aggregate device, passthrough, latency measurement |
-| 1 | 10-band graphic EQ, preamp above 100% with soft limiter, menu bar panel, volume-key capture, presets |
+| 0 | Engine: tap, aggregate device, render loop, latency measured at 10.7 ms. **Done** |
+| 1 | 10-band graphic EQ, preamp above 100% with soft limiter, menu bar panel, volume-key capture, presets. **Done** |
 | 2 | Live spectrum analyzer, full parametric mode, balance, mono, output delay |
 | 3 | Per-device profiles, AutoEq headphone correction library |
 | 4 | Per-app volume and EQ mixer |

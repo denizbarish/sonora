@@ -20,6 +20,12 @@ jobs:
       - name: Test
         run: swift test --parallel
 
+      # XcodeGen is not preinstalled on the runner image, and make-dmg.sh calls
+      # it. Without this the job dies at that line, loudly, which is better
+      # than shipping a bad image but still a red release.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
       # No signing identity on the runner, so the app inside is ad hoc signed.
       # That is enough for the audio permission, which macOS keys to the
       # binary's hash, and not enough for Gatekeeper, which the README covers.
