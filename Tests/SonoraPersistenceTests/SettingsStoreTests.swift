@@ -330,4 +330,41 @@ struct SettingsStoreTests {
         #expect(store.load() == Settings.defaults)
         #expect(store.lastLoadFailure == .corrupt(backupURL: nil))
     }
+    @Test("a file written before the volume key flag existed still loads")
+    func schemaWithoutVolumeKeyFlag() throws {
+        let directory = try makeTemporaryDirectory()
+        let store = SettingsStore(directory: directory)
+
+        // Hand written on purpose. Encoding a Settings here would use the same
+        // code the decoder uses, so it could not fail on a schema change.
+        let payload = """
+        {
+          "schemaVersion": 2,
+          "isBypassed": false,
+          "preampDecibels": -3,
+          "bands": [],
+          "userPresets": [],
+          "recentPresetIDs": ["builtin.vocal"]
+        }
+        """
+        try Data(payload.utf8).write(to: store.fileURL)
+
+        let loaded = store.load()
+
+        #expect(store.lastLoadFailure == nil)
+        #expect(loaded.preampDecibels == -3)
+        #expect(loaded.recentPresetIDs == ["builtin.vocal"])
+        #expect(loaded.capturesVolumeKeys == false)
+    }
+
+    @Test("the volume key flag survives a round trip")
+    func volumeKeyFlagRoundTrip() throws {
+        let store = SettingsStore(directory: try makeTemporaryDirectory())
+
+        var settings = Settings.defaults
+        settings.capturesVolumeKeys = true
+        try store.save(settings)
+
+        #expect(store.load().capturesVolumeKeys == true)
+    }
 }
