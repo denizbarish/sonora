@@ -15,6 +15,8 @@ struct PanelView: View {
             preamp
             equalizer
             presets
+            Divider()
+            volumeKeys
             footer
         }
         .padding(14)
@@ -129,6 +131,26 @@ struct PanelView: View {
             activeID: model.activePresetID,
             onSelect: model.selectPreset
         )
+    }
+
+    private var volumeKeys: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Use the volume keys", isOn: $model.capturesVolumeKeys)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+
+            if let problem = model.volumeKeyProblem {
+                HStack(spacing: 6) {
+                    Text(problem)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Button("Open Settings", action: model.openAccessibilitySettings)
+                        .controlSize(.small)
+                }
+            }
+        }
     }
 
     private var footer: some View {

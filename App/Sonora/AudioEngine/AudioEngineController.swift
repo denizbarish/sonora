@@ -145,6 +145,15 @@ final class AudioEngineController {
     /// Identifiers of the presets the user picked, most recent first.
     var recentPresetIDs: [String] { settings.recentPresetIDs }
 
+    var capturesVolumeKeys: Bool { settings.capturesVolumeKeys }
+
+    /// Records the preference. The tap itself is owned by the interface, which
+    /// is where the permission conversation belongs.
+    func setCapturesVolumeKeys(_ enabled: Bool) {
+        settings.capturesVolumeKeys = enabled
+        scheduleSave()
+    }
+
     func start() {
         guard state != .running else { return }
 

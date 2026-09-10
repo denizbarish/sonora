@@ -52,6 +52,13 @@ final class PanelModel {
         }
     }
 
+    var capturesVolumeKeys: Bool {
+        didSet {
+            guard capturesVolumeKeys != oldValue else { return }
+            applyVolumeKeyPreference()
+        }
+    }
+
     /// The presets to offer as one-tap pills, most recently used first.
     ///
     /// Padded with the first built-ins until the user has actually used three,
@@ -64,11 +71,16 @@ final class PanelModel {
     private(set) var stateDescription: String
     private(set) var isRunning: Bool
 
+    /// Set when turning the feature on did not work, so the panel can explain
+    /// rather than leaving a toggle that lies.
+    private(set) var volumeKeyProblem: String?
+
     /// How many pills the row offers.
     private static let recentPresetCount = 3
 
     private let engine: AudioEngineController
     private let volume: SystemVolume
+    private let volumeKeys = VolumeKeyTap()
     private var isApplyingPreset = false
 
     init(engine: AudioEngineController, volume: SystemVolume) {
@@ -85,7 +97,12 @@ final class PanelModel {
         self.availableOutputs = volume.availableOutputs
         self.stateDescription = Self.describe(engine.state)
         self.isRunning = engine.state == .running
+        self.capturesVolumeKeys = engine.capturesVolumeKeys
         refreshRecentPresets()
+
+        volumeKeys.onKey = { [weak self] key in
+            self?.handleVolumeKey(key)
+        }
 
         engine.onStateChange = { [weak self] state in
             Task { @MainActor in self?.engineStateChanged(state) }
@@ -95,6 +112,10 @@ final class PanelModel {
         }
         engine.onOutputDeviceChange = { [weak self] in
             Task { @MainActor in self?.outputDeviceChanged() }
+        }
+
+        if capturesVolumeKeys, AccessibilityPermission.isTrusted {
+            try? volumeKeys.start()
         }
     }
 
@@ -136,6 +157,51 @@ final class PanelModel {
 
     func retry() {
         engine.retry()
+    }
+
+    /// Opens the Accessibility pane, for when the system will not prompt again.
+    func openAccessibilitySettings() {
+        AccessibilityPermission.openSettings()
+    }
+
+    /// Starts or stops the tap, asking for permission when it is needed.
+    ///
+    /// If the app is still untrusted after asking, the toggle goes back off.
+    /// A toggle that stays on while nothing is captured is worse than one that
+    /// refuses, because the user has no way to tell the difference.
+    private func applyVolumeKeyPreference() {
+        volumeKeyProblem = nil
+
+        guard capturesVolumeKeys else {
+            volumeKeys.stop()
+            engine.setCapturesVolumeKeys(false)
+            return
+        }
+
+        if !AccessibilityPermission.isTrusted {
+            AccessibilityPermission.request()
+        }
+
+        do {
+            try volumeKeys.start()
+            engine.setCapturesVolumeKeys(true)
+        } catch {
+            capturesVolumeKeys = false
+            engine.setCapturesVolumeKeys(false)
+            volumeKeyProblem = error.localizedDescription
+        }
+    }
+
+    /// One key press. Steps match the system's own, an eighth of full scale.
+    private func handleVolumeKey(_ key: VolumeKeyTap.Key) {
+        switch key {
+        case .up:
+            systemVolume = min(systemVolume + 0.0625, 1)
+        case .down:
+            systemVolume = max(systemVolume - 0.0625, 0)
+        case .mute:
+            volume.isMuted.toggle()
+        }
     }
 
     /// Rebuilds `recentPresets` from what the engine remembers.
