@@ -6,3 +6,6 @@ xcuserdata/
 
 App/Sonora.xcodeproj/
 *.xcworkspace/
+
+# Built by Scripts/make-dmg.sh.
+*.dmg

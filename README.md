@@ -37,12 +37,31 @@ Every failure path falls back to bypass, which destroys the tap and returns audi
 | 4 | Per-app volume and EQ mixer |
 | 5 | AudioDriverKit fallback engine for cases the tap cannot cover |
 
+## Install
+
+Download the disk image from [Releases](https://github.com/denizbarish/sonora/releases), open it, and drag Sonora to Applications.
+
+**The first launch needs a right-click.** Sonora is not notarised, because notarisation requires a paid Apple Developer Program membership. macOS will refuse to open it normally. Right-click the app, choose Open, and confirm. You only have to do this once per version.
+
+Then Sonora asks for permission to record system audio. That is what lets it apply the equalizer to what your Mac is playing. The audio is processed as it plays and is never recorded, stored or sent anywhere.
+
+Because the build is not signed with a developer identity, macOS ties that permission to the exact binary, so each new version asks again.
+
 ## Requirements
 
 - macOS 14.4 or later
 - Apple silicon or Intel
 
-Building from source additionally needs Xcode 26 or later and a signing identity. Process taps will not work in an unsigned build, because the permission record is keyed to the signing identity.
+## Build from source
+
+```bash
+git clone https://github.com/denizbarish/sonora.git
+cd sonora
+swift test
+cd App && xcodegen generate
+```
+
+Then open `App/Sonora.xcodeproj` in Xcode, choose your team under Signing & Capabilities, and run. `App/README.md` explains why signing matters here: an unsigned build never receives the audio permission, so it launches and captures nothing.
 
 ## Design
 
