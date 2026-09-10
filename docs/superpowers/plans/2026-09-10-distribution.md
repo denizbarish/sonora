@@ -69,7 +69,10 @@ import CoreGraphics
 //
 // Run from a terminal that already holds the Accessibility permission.
 
-let mask = CGEventMask(1 << CGEventType.systemDefined.rawValue)
+// CGEventType has no case for system defined events, so the mask is built
+// from the raw NX_SYSDEFINED value, 14. This is the standard idiom for tapping
+// media keys.
+let mask = CGEventMask(1 << 14)
 
 guard let tap = CGEvent.tapCreate(
     tap: .cghidEventTap,
