@@ -299,10 +299,17 @@ enum AccessibilityPermission {
 
     /// Whether the app is trusted. Never prompts, so it is safe to call on
     /// every launch and whenever the panel opens.
+    /// The prompt option's key, spelled out rather than taken from the SDK.
+    ///
+    /// `AXUIElement.h` declares `kAXTrustedCheckOptionPrompt` without `const`,
+    /// so Swift imports it as a mutable global and language mode 6 rejects
+    /// reading it: "not concurrency-safe because it involves shared mutable
+    /// state". Every way to keep the constant is a way to suppress that check.
+    /// The literal is verified equal to the SDK's value by `CFEqual`.
+    private static let promptOption = "AXTrustedCheckOptionPrompt" as CFString
+
     static var isTrusted: Bool {
-        AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): false] as CFDictionary
-        )
+        AXIsProcessTrustedWithOptions([promptOption: false] as CFDictionary)
     }
 
     /// Asks the system to show its permission prompt.
@@ -311,9 +318,7 @@ enum AccessibilityPermission {
     /// silent and the only route is System Settings, which is why
     /// `openSettings()` exists alongside this.
     static func request() {
-        _ = AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        )
+        _ = AXIsProcessTrustedWithOptions([promptOption: true] as CFDictionary)
     }
 
     /// Opens the Accessibility pane, for when the prompt will not appear again.
