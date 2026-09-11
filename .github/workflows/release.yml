@@ -33,7 +33,9 @@ jobs:
         run: ./Scripts/make-dmg.sh "${GITHUB_REF_NAME#v}"
 
       - name: Attach it to the release
-        uses: softprops/action-gh-release@v2
+        # Pinned to a commit, not a tag: this job has contents: write, and a
+        # mutable tag hands whoever can move it write access to the release.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: Sonora-*.dmg
           draft: true
