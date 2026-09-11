@@ -76,6 +76,7 @@ final class VolumeKeyTap {
 
                 let keyCode = Int32((nsEvent.data1 & 0xFFFF_0000) >> 16)
                 let isPressed = ((nsEvent.data1 & 0x0000_FF00) >> 8) == 0x0A
+                let isRepeat = (nsEvent.data1 & 0x1) == 1
 
                 let key: Key?
                 switch keyCode {
@@ -86,6 +87,15 @@ final class VolumeKeyTap {
                 }
 
                 guard let key else { return Unmanaged.passUnretained(event) }
+
+                // Repeats are wanted for up and down, so holding either one
+                // keeps stepping. Not for mute: each repeat would toggle the
+                // device back again and flicker the overlay. Whether the mute
+                // key produces repeats at all was never measured, and ignoring
+                // them is right either way. Swallowed rather than passed on,
+                // so the system's overlay does not appear for the repeat
+                // Sonora chose to ignore.
+                if isRepeat, key == .mute { return nil }
 
                 if isPressed {
                     let owner = Unmanaged<VolumeKeyTap>.fromOpaque(userInfo)

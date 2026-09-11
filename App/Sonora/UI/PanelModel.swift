@@ -116,7 +116,20 @@ final class PanelModel {
         }
 
         if capturesVolumeKeys, AccessibilityPermission.isTrusted {
-            try? volumeKeys.start()
+            do {
+                try volumeKeys.start()
+            } catch {
+                // The same three steps, in the same order, that
+                // `applyVolumeKeyPreference()` takes when starting fails: the
+                // toggle goes back off, the engine's stored preference follows
+                // it, and the reason is recorded last so the panel can explain
+                // itself the first time it is opened. They are spelled out
+                // rather than left to the `didSet`, because property observers
+                // do not run for assignments made inside an initialiser.
+                capturesVolumeKeys = false
+                engine.setCapturesVolumeKeys(false)
+                volumeKeyProblem = error.localizedDescription
+            }
         }
     }
 
@@ -165,24 +178,37 @@ final class PanelModel {
         AccessibilityPermission.openSettings()
     }
 
-    /// Re-checks whether the tap is still allowed to run.
+    /// Re-checks whether the tap is still allowed to run, and whether it is.
     ///
     /// `AccessibilityPermission.isTrusted` is a snapshot. Someone can remove
     /// Sonora from the Accessibility list while it runs, and then the tap stops
-    /// receiving events with no error at all. Without this the checkbox would
-    /// go on claiming the feature is active while the keys had quietly gone
-    /// back to the system.
+    /// receiving events with no error at all. The tap can also simply not be
+    /// running: starting it at launch can fail while the app is trusted, and a
+    /// preference that was saved as on says nothing about whether it took.
+    /// Without both checks the checkbox would go on claiming the feature is
+    /// active while the keys had quietly gone back to the system.
+    ///
+    /// The two cases get different messages because the remedies differ: one
+    /// needs the permission granted again, the other only another attempt.
     ///
     /// Called when the panel is about to be shown, which is the only moment the
     /// answer matters to anyone looking.
     func refreshVolumeKeyState() {
         guard capturesVolumeKeys else { return }
-        guard !AccessibilityPermission.isTrusted else { return }
+
+        // Read once, so the message below describes the state that was tested.
+        let isTrusted = AccessibilityPermission.isTrusted
+        guard !isTrusted || !volumeKeys.isRunning else { return }
 
         volumeKeys.stop()
+        // Setting this runs its `didSet`, which calls
+        // `applyVolumeKeyPreference()` and clears `volumeKeyProblem`, so the
+        // message has to be assigned after it rather than before.
         capturesVolumeKeys = false
         engine.setCapturesVolumeKeys(false)
-        volumeKeyProblem = "Sonora is no longer trusted for Accessibility, so the volume keys went back to the system."
+        volumeKeyProblem = isTrusted
+            ? "Sonora is not capturing the volume keys, so they stayed with the system. Turn this on again to try once more."
+            : "Sonora is no longer trusted for Accessibility, so the volume keys went back to the system."
     }
 
     /// Starts or stops the tap, asking for permission when it is needed.
@@ -230,8 +256,20 @@ final class PanelModel {
 
         switch key {
         case .up:
+            // Volume up unmutes, which is what the system's own handler does.
+            // Mute is a separate device property from the level, so without
+            // this the overlay would show a rising level beside a muted
+            // speaker and nothing would come out of it.
+            if volume.isMuted {
+                volume.isMuted = false
+            }
             systemVolume = min(systemVolume + 0.0625, 1)
         case .down:
+            // Deliberately not the mirror image, including from zero. The
+            // system leaves mute alone on volume down, and a key that means
+            // "less" should not be the one that lets the sound back in: an
+            // unmute here would be inaudible at zero and then turn the next
+            // press into sound the user never asked to hear.
             systemVolume = max(systemVolume - 0.0625, 0)
         case .mute:
             volume.isMuted.toggle()
