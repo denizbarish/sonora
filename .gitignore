@@ -6,3 +6,9 @@ xcuserdata/
 
 App/Sonora.xcodeproj/
 *.xcworkspace/
+
+# Built by Scripts/make-dmg.sh.
+*.dmg
+
+# Compiled spike binaries
+Tools/volume-key-spike/volume-key-spike

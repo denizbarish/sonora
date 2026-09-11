@@ -39,6 +39,13 @@ public struct Settings: Codable, Equatable, Sendable {
     /// reads this.
     public var recentPresetIDs: [String]
 
+    /// Whether Sonora puts the volume keys under its own control.
+    ///
+    /// Off by default, and deliberately so: turning it on requires the
+    /// Accessibility permission, which is a much bigger thing to ask for than
+    /// audio capture. Someone who never wants it never sees that prompt.
+    public var capturesVolumeKeys: Bool
+
     public init(
         schemaVersion: Int = Settings.currentSchemaVersion,
         isBypassed: Bool = false,
@@ -46,7 +53,8 @@ public struct Settings: Codable, Equatable, Sendable {
         bands: [EqualizerBand] = EqualizerBand.graphicDefaults,
         activePresetID: String? = BuiltInPresets.flat.id,
         userPresets: [Preset] = [],
-        recentPresetIDs: [String] = []
+        recentPresetIDs: [String] = [],
+        capturesVolumeKeys: Bool = false
     ) {
         self.schemaVersion = schemaVersion
         self.isBypassed = isBypassed
@@ -55,6 +63,7 @@ public struct Settings: Codable, Equatable, Sendable {
         self.activePresetID = activePresetID
         self.userPresets = userPresets
         self.recentPresetIDs = recentPresetIDs
+        self.capturesVolumeKeys = capturesVolumeKeys
     }
 
     /// Decoded by hand so that a file written before `recentPresetIDs` existed
@@ -78,6 +87,11 @@ public struct Settings: Codable, Equatable, Sendable {
         self.recentPresetIDs = try container.decodeIfPresent(
             [String].self, forKey: .recentPresetIDs
         ) ?? []
+        // Added after the schema was already at 2. A file without the key is
+        // not an error, it just predates the feature.
+        capturesVolumeKeys = try container.decodeIfPresent(
+            Bool.self, forKey: .capturesVolumeKeys
+        ) ?? false
     }
 
     public static let defaults = Settings()

@@ -15,6 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var panelController = PanelController(model: model)
     private lazy var menuController = StatusMenuController(panelController: panelController)
 
+    private lazy var welcome = WelcomeWindow(onContinue: { [weak self] in
+        self?.engine.retry()
+    })
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(
@@ -24,6 +28,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menuController.install(in: statusItem)
         engine.start()
+
+        // Only when the engine could not get the permission. On a machine that
+        // already granted it, this window would be noise.
+        if case .bypassed = engine.state {
+            welcome.show()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -32,6 +32,8 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     private func show(from button: NSStatusBarButton) {
+        model.refreshVolumeKeyState()
+
         let panel = existingOrNewPanel()
 
         guard let buttonWindow = button.window else { return }

@@ -2,7 +2,7 @@
 
 A system-wide audio equalizer and per-app volume mixer for macOS. No driver install, no admin password, no kernel extension.
 
-> **Status: early development.** Nothing is shippable yet. The design is settled and the engine spike is in progress. Follow along, the commit history is the build log.
+> **Status: early, but it works.** The engine and the panel are built and running: system audio goes through a ten band equalizer with presets, and the volume keys can drive it. Not notarised yet, so the first launch needs a right-click; see Install below. The commit history is the build log.
 
 ## Why
 
@@ -30,19 +30,40 @@ Every failure path falls back to bypass, which destroys the tap and returns audi
 
 | Phase | What |
 |---|---|
-| 0 | Engine spike: tap, aggregate device, passthrough, latency measurement |
-| 1 | 10-band graphic EQ, preamp above 100% with soft limiter, menu bar panel, volume-key capture, presets |
+| 0 | Engine: tap, aggregate device, render loop, latency measured at 10.7 ms. **Done** |
+| 1 | 10-band graphic EQ, preamp above 100% with soft limiter, menu bar panel, volume-key capture, presets. **Done** |
 | 2 | Live spectrum analyzer, full parametric mode, balance, mono, output delay |
 | 3 | Per-device profiles, AutoEq headphone correction library |
 | 4 | Per-app volume and EQ mixer |
 | 5 | AudioDriverKit fallback engine for cases the tap cannot cover |
 
+## Install
+
+Download the disk image from [Releases](https://github.com/denizbarish/sonora/releases), open it, and drag Sonora to Applications.
+
+**The first launch takes an extra step.** Sonora is not notarised, because notarisation needs a paid Apple Developer Program membership, so macOS will refuse to open it the first time. Open it anyway, see the warning, then go to System Settings, Privacy & Security, scroll to the bottom and click **Open Anyway**. Confirm when the warning comes back. Once per version.
+
+If you have read older advice about right-clicking and choosing Open, that route was removed in macOS 15 and no longer works.
+
+Then Sonora asks for permission to record system audio. That is what lets it apply the equalizer to what your Mac is playing. The audio is processed as it plays and is never recorded, stored or sent anywhere.
+
+The release build is signed ad hoc rather than with a developer identity. macOS ties the audio permission to the signed binary, so expect to grant it again after an update.
+
 ## Requirements
 
 - macOS 14.4 or later
-- Apple silicon or Intel
+- Apple silicon or Intel. The release build is a universal binary, and the packaging script refuses to produce an image that is not.
 
-Building from source additionally needs Xcode 26 or later and a signing identity. Process taps will not work in an unsigned build, because the permission record is keyed to the signing identity.
+## Build from source
+
+```bash
+git clone https://github.com/denizbarish/sonora.git
+cd sonora
+swift test
+cd App && xcodegen generate
+```
+
+Then open `App/Sonora.xcodeproj` in Xcode, choose your team under Signing & Capabilities, and run. `App/README.md` explains why signing matters here: an unsigned build never receives the audio permission, so it launches and captures nothing.
 
 ## Design
 

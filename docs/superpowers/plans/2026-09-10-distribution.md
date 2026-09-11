@@ -69,7 +69,10 @@ import CoreGraphics
 //
 // Run from a terminal that already holds the Accessibility permission.
 
-let mask = CGEventMask(1 << CGEventType.systemDefined.rawValue)
+// CGEventType has no case for system defined events, so the mask is built
+// from the raw NX_SYSDEFINED value, 14. This is the standard idiom for tapping
+// media keys.
+let mask = CGEventMask(1 << 14)
 
 guard let tap = CGEvent.tapCreate(
     tap: .cghidEventTap,
@@ -296,10 +299,17 @@ enum AccessibilityPermission {
 
     /// Whether the app is trusted. Never prompts, so it is safe to call on
     /// every launch and whenever the panel opens.
+    /// The prompt option's key, spelled out rather than taken from the SDK.
+    ///
+    /// `AXUIElement.h` declares `kAXTrustedCheckOptionPrompt` without `const`,
+    /// so Swift imports it as a mutable global and language mode 6 rejects
+    /// reading it: "not concurrency-safe because it involves shared mutable
+    /// state". Every way to keep the constant is a way to suppress that check.
+    /// The literal is verified equal to the SDK's value by `CFEqual`.
+    private static let promptOption = "AXTrustedCheckOptionPrompt" as CFString
+
     static var isTrusted: Bool {
-        AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): false] as CFDictionary
-        )
+        AXIsProcessTrustedWithOptions([promptOption: false] as CFDictionary)
     }
 
     /// Asks the system to show its permission prompt.
@@ -308,9 +318,7 @@ enum AccessibilityPermission {
     /// silent and the only route is System Settings, which is why
     /// `openSettings()` exists alongside this.
     static func request() {
-        _ = AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        )
+        _ = AXIsProcessTrustedWithOptions([promptOption: true] as CFDictionary)
     }
 
     /// Opens the Accessibility pane, for when the prompt will not appear again.
@@ -402,7 +410,9 @@ final class VolumeKeyTap {
         guard !isRunning else { return }
         guard AccessibilityPermission.isTrusted else { throw TapError.notTrusted }
 
-        let mask = CGEventMask(1 << CGEventType.systemDefined.rawValue)
+        // CGEventType has no case for system defined events, so the mask comes
+        // from the raw NX_SYSDEFINED value, 14.
+        let mask = CGEventMask(1 << 14)
 
         // The callback cannot capture main-actor state, so it carries an
         // unmanaged pointer to self and hops back to the main actor with the
@@ -952,6 +962,12 @@ jobs:
 
       - name: Test
         run: swift test --parallel
+
+      # XcodeGen is not preinstalled on the runner image, and make-dmg.sh calls
+      # it. Verified by searching the runner-images repository: zero hits for
+      # xcodegen, while swiftlint returns its install script.
+      - name: Install XcodeGen
+        run: brew install xcodegen
 
       # No signing identity on the runner, so the app inside is ad hoc signed.
       # That is enough for the audio permission, which macOS keys to the
