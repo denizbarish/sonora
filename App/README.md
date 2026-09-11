@@ -15,10 +15,11 @@ xcodebuild -project Sonora.xcodeproj -scheme Sonora -configuration Debug build
 
 Process taps need a real signing identity. The system keys the audio permission
 record to it. An unsigned build never sees the prompt at all. An ad hoc build
-is signed, so it has a code identity, and one was measured running the tap
-successfully on the development machine. That measurement was not clean, since
-the machine already held a grant for the bundle identifier, so treat ad hoc as
-working rather than proven.
+is signed, so it has a code identity, and it works: the packaged ad hoc build
+was installed to `/Applications` after `tccutil reset SystemAudioCaptureRequests
+com.sonora.Sonora` cleared the machine's existing grant, and the panel read
+Running. So a release without a paid Apple Developer membership can capture
+audio. The grant is keyed to the binary, which is why an update asks again.
 
 Export your identity, then generate and build:
 
