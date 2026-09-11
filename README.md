@@ -41,16 +41,18 @@ Every failure path falls back to bypass, which destroys the tap and returns audi
 
 Download the disk image from [Releases](https://github.com/denizbarish/sonora/releases), open it, and drag Sonora to Applications.
 
-**The first launch needs a right-click.** Sonora is not notarised, because notarisation requires a paid Apple Developer Program membership. macOS will refuse to open it normally. Right-click the app, choose Open, and confirm. You only have to do this once per version.
+**The first launch takes an extra step.** Sonora is not notarised, because notarisation needs a paid Apple Developer Program membership, so macOS will refuse to open it the first time. Open it anyway, see the warning, then go to System Settings, Privacy & Security, scroll to the bottom and click **Open Anyway**. Confirm when the warning comes back. Once per version.
+
+If you have read older advice about right-clicking and choosing Open, that route was removed in macOS 15 and no longer works.
 
 Then Sonora asks for permission to record system audio. That is what lets it apply the equalizer to what your Mac is playing. The audio is processed as it plays and is never recorded, stored or sent anywhere.
 
-Because the build is not signed with a developer identity, macOS ties that permission to the exact binary, so each new version asks again.
+The release build is signed ad hoc rather than with a developer identity. macOS ties the audio permission to the signed binary, so expect to grant it again after an update.
 
 ## Requirements
 
 - macOS 14.4 or later
-- Apple silicon or Intel
+- Apple silicon or Intel. The release build is a universal binary, and the packaging script refuses to produce an image that is not.
 
 ## Build from source
 

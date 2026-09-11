@@ -239,7 +239,7 @@ final class PanelModel {
         }
     }
 
-    /// One key press. Steps match the system's own, an eighth of full scale.
+    /// One key press. Steps match the system's own, a sixteenth of full scale.
     ///
     /// The only place that knows a volume key was pressed and that Sonora
     /// acted on it, which is why the overlay is shown from here and from

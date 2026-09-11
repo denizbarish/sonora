@@ -14,7 +14,11 @@ xcodebuild -project Sonora.xcodeproj -scheme Sonora -configuration Debug build
 ## Run
 
 Process taps need a real signing identity. The system keys the audio permission
-record to it, so an ad hoc build never sees the permission prompt at all.
+record to it. An unsigned build never sees the prompt at all. An ad hoc build
+is signed, so it has a code identity, and one was measured running the tap
+successfully on the development machine. That measurement was not clean, since
+the machine already held a grant for the bundle identifier, so treat ad hoc as
+working rather than proven.
 
 Export your identity, then generate and build:
 
@@ -36,8 +40,11 @@ Sonora target, open Signing & Capabilities and pick your team. A free Apple ID
 gives you a Personal Team, which is enough. Xcode issues the certificate the
 first time it signs.
 
-With the variable unset the project still builds, ad hoc, which is fine for
-compiling and for running the interface but cannot capture audio.
+With the variable unset the project still builds, ad hoc. That is what the
+release script does, and it keeps Hardened Runtime: `Scripts/make-dmg.sh` gates
+on the `runtime` flag and would refuse the image otherwise. Xcode only drops
+Hardened Runtime when *automatic* signing fails and falls back on its own, which
+is a different path from asking for ad hoc directly.
 
 Check what you got:
 

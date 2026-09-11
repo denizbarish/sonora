@@ -40,6 +40,10 @@ targets:
         # "No Account for Team" whenever xcodebuild cannot see the Xcode
         # account, and then falls back to ad hoc signing while silently turning
         # Hardened Runtime off. Naming the identity directly avoids all of it.
+        #
+        # Note the asymmetry: it is automatic signing's fallback that drops
+        # Hardened Runtime, not ad hoc signing as such. Asking for ad hoc
+        # directly, which is what CI does, keeps the runtime flag. Measured.
         CODE_SIGN_STYLE: Manual
         INFOPLIST_FILE: Sonora/Info.plist
         GENERATE_INFOPLIST_FILE: NO
