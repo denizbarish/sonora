@@ -81,6 +81,7 @@ final class PanelModel {
     private let engine: AudioEngineController
     private let volume: SystemVolume
     private let volumeKeys = VolumeKeyTap()
+    private let volumeHUD = VolumeHUDController()
     private var isApplyingPreset = false
 
     init(engine: AudioEngineController, volume: SystemVolume) {
@@ -213,7 +214,20 @@ final class PanelModel {
     }
 
     /// One key press. Steps match the system's own, an eighth of full scale.
+    ///
+    /// The only place that knows a volume key was pressed and that Sonora
+    /// acted on it, which is why the overlay is shown from here and from
+    /// nowhere else. `volumeChanged()` deliberately does not show it: a change
+    /// made in System Settings or by another app is not Sonora's to report,
+    /// and popping an overlay for it would be worse than the silence this
+    /// feature is fixing.
     private func handleVolumeKey(_ key: VolumeKeyTap.Key) {
+        // The tap is the only caller and it is stopped whenever the preference
+        // is off, so this is belt and braces. It is here because the rule that
+        // nothing is drawn while the feature is off should be readable in the
+        // one method that draws.
+        guard capturesVolumeKeys else { return }
+
         switch key {
         case .up:
             systemVolume = min(systemVolume + 0.0625, 1)
@@ -222,6 +236,10 @@ final class PanelModel {
         case .mute:
             volume.isMuted.toggle()
         }
+
+        // Read back rather than assumed: the mute switch is the device's, and
+        // after a step the level is whatever the clamp above settled on.
+        volumeHUD.show(level: systemVolume, isMuted: volume.isMuted)
     }
 
     /// Rebuilds `recentPresets` from what the engine remembers.
