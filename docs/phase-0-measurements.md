@@ -72,3 +72,21 @@ thread. The chain is now built for the output format and the render block
 refuses a shape it was not built for.
 
 Still open: Bluetooth specifically, sustained CPU, and Loudness at full volume.
+
+## Release checklist, ad hoc build
+
+Run by hand on the machine described above, 2026-09-11, against the packaged
+ad hoc build installed to `/Applications`.
+
+| Check | Result |
+|---|---|
+| Section 10 item 5: `tccutil reset SystemAudioCaptureRequests com.sonora.Sonora`, flow works from scratch | Pass, the panel read Running afterwards |
+
+This is the measurement that decides distribution: ad hoc signing carries a code
+identity the system will grant the audio permission to, so a release without a
+paid Apple Developer membership can capture audio. It does not cover a clean
+machine, only a cleared grant on this one.
+
+Still open from section 10 before v0.1 is tagged: item 3, Bluetooth, and item 6,
+preamp at maximum without clipping. Settings surviving a relaunch is also still
+unverified.
