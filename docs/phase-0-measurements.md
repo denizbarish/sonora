@@ -56,7 +56,7 @@ Run by hand on the machine described above, 2026-09-09.
 | Preset change audible | Pass |
 | Preset switching clean, no clicks | Pass |
 | Bypass toggles correctly | Not tested separately |
-| Settings survive relaunch | Not tested |
+| Settings survive relaunch | Pass, checked by hand 2026-09-14: the panel came back with the same settings |
 | Headphone plug survives | Pass, audio continued and the equalizer stayed applied |
 | Bluetooth switch survives | Not tested |
 | `kill -9` restores audio | Pass, verified during the latency gate above |
@@ -107,3 +107,14 @@ and 86 percent average CPU over a hundred seconds, with
 `AudioObjectRemovePropertyListenerBlock` reports success and removes nothing,
 so the listeners piled up and one device notification ran `refresh()` once per
 listener that had accumulated. See `Tools/listener-removal-spike`.
+
+## Settings round trip on disk
+
+Measured 2026-09-14, separately from the check above, because the panel showing
+the right values and the file being intact are two different claims.
+
+Markers written into `settings.json` by hand, preamp 4.5 dB and 7.25 dB on the
+32 Hz band, survived a launch and a clean quit unchanged, with the schema still
+at 2. That covers the file. It does not cover loading: nothing writes unless
+something changes, so an app that fell back to defaults would leave the same
+file behind. The panel half is the hand check in the table.
