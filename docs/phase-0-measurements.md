@@ -90,3 +90,20 @@ machine, only a cleared grant on this one.
 Still open from section 10 before v0.1 is tagged: item 3, Bluetooth, and item 6,
 preamp at maximum without clipping. Settings surviving a relaunch is also still
 unverified.
+
+## Sleep and wake
+
+Added to the checklist because it was missing from it, and the gap cost a bug
+that made the app unusable: waking the machine left Sonora spinning with the
+menu bar icon unresponsive.
+
+| Check | Result |
+|---|---|
+| Sleep the machine, wake it, open the panel from the icon | Pass, verified by hand 2026-09-14 with the listener fix in place |
+
+Before the fix this failed every time, and two CPU diagnostics recorded it: 85
+and 86 percent average CPU over a hundred seconds, with
+`SystemVolume.refresh()` calling `removeListeners()` as the heaviest stack.
+`AudioObjectRemovePropertyListenerBlock` reports success and removes nothing,
+so the listeners piled up and one device notification ran `refresh()` once per
+listener that had accumulated. See `Tools/listener-removal-spike`.
