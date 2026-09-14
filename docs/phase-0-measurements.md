@@ -99,7 +99,7 @@ menu bar icon unresponsive.
 
 | Check | Result |
 |---|---|
-| Sleep the machine, wake it, open the panel from the icon | Pass, verified by hand 2026-09-14 with the listener fix in place |
+| Sleep the machine, wake it, open the panel from the icon | Not verified against the fix, see below |
 
 Before the fix this failed every time, and two CPU diagnostics recorded it: 85
 and 86 percent average CPU over a hundred seconds, with
@@ -107,6 +107,19 @@ and 86 percent average CPU over a hundred seconds, with
 `AudioObjectRemovePropertyListenerBlock` reports success and removes nothing,
 so the listeners piled up and one device notification ran `refresh()` once per
 listener that had accumulated. See `Tools/listener-removal-spike`.
+
+This row said Pass earlier on 2026-09-14 and that was wrong. The check was run
+against the copy in `/Applications`, which was built on 2026-09-10 and carries
+neither `AudioPropertyListener` nor `VolumeHUD`, so whatever it showed said
+nothing about the fix. The mechanism is measured, in the spike above, and the
+end to end check is waiting on a build that contains it.
+
+Worth the minute it costs before any future check: confirm the binary under
+test is the one being claimed.
+
+```bash
+nm -a /Applications/Sonora.app/Contents/MacOS/Sonora | grep -c AudioPropertyListener
+```
 
 ## Settings round trip on disk
 
