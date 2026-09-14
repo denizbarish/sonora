@@ -9,11 +9,10 @@ import Foundation
 /// stops with no error.
 final class DeviceWatcher {
 
-    private let onChange: () -> Void
-    private let queue = DispatchQueue(label: "com.sonora.DeviceWatcher")
-    private var listenerBlock: AudioObjectPropertyListenerBlock?
+    private let onChange: @Sendable () -> Void
+    private var listener: AudioPropertyListener?
 
-    private var address = AudioObjectPropertyAddress(
+    private let address = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDefaultOutputDevice,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
@@ -24,28 +23,19 @@ final class DeviceWatcher {
     }
 
     func start() throws {
-        guard listenerBlock == nil else { return }
+        guard listener == nil else { return }
 
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            self.onChange()
+        // Captured on its own rather than through `self`, so the handler holds
+        // nothing that has to outlive the registration.
+        let onChange = self.onChange
+        listener = try AudioPropertyListener(object: .system, address: address) {
+            onChange()
         }
-
-        let status = AudioObjectAddPropertyListenerBlock(
-            AudioObjectID.system, &address, queue, block
-        )
-        guard status == noErr else {
-            throw AudioEngineError.propertyReadFailed(
-                kAudioHardwarePropertyDefaultOutputDevice, status
-            )
-        }
-        listenerBlock = block
     }
 
     func stop() {
-        guard let block = listenerBlock else { return }
-        AudioObjectRemovePropertyListenerBlock(AudioObjectID.system, &address, queue, block)
-        listenerBlock = nil
+        listener?.cancel()
+        listener = nil
     }
 
     deinit {

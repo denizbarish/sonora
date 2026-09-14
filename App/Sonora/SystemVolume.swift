@@ -24,16 +24,16 @@ final class SystemVolume {
 
     private var deviceID = AudioObjectID.unknown
     private let logger = Logger(subsystem: "com.sonora.Sonora", category: "SystemVolume")
-    private let queue = DispatchQueue(label: "com.sonora.SystemVolume")
-    private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+    /// Registered once and kept for the whole life of the object.
+    private var systemListeners: [AudioPropertyListener] = []
+
+    /// Registered on whichever device is currently the default, and moved when
+    /// that changes.
+    private var deviceListeners: [AudioPropertyListener] = []
 
     init() {
+        startSystemListeners()
         refresh()
-    }
-
-    deinit {
-        // Listener removal needs the same addresses it registered with; the
-        // objects die with the process anyway, so nothing is leaked in practice.
     }
 
     /// 0 to 1. Reads and writes `kAudioDevicePropertyVolumeScalar` on the
@@ -174,16 +174,13 @@ final class SystemVolume {
         return list.contains { $0.mNumberChannels > 0 }
     }
 
-    /// Re-reads the default output device and re-registers listeners on it.
-    /// Call after the engine reports a device change.
+    /// Re-reads the default output device and moves the volume and mute
+    /// listeners onto it. Call after the engine reports a device change.
     func refresh() {
-        removeListeners()
-
-        // On the system object rather than on a device, so the picker still
-        // notices a device arriving, leaving, or becoming the default when the
-        // engine's own state has not changed and it therefore reports nothing.
-        addSystemListener(address: Self.defaultOutputDeviceAddress)
-        addSystemListener(address: Self.devicesAddress)
+        for listener in deviceListeners {
+            listener.cancel()
+        }
+        deviceListeners.removeAll()
 
         guard let device = try? AudioObjectID.readDefaultOutputDevice() else {
             deviceID = .unknown
@@ -196,55 +193,55 @@ final class SystemVolume {
         outputDeviceName = (try? device.readString(kAudioObjectPropertyName)) ?? "Unknown"
         availableOutputs = readAvailableOutputs()
 
-        addListener(on: device, address: Self.volumeAddress)
-        addListener(on: device, address: Self.muteAddress)
+        addDeviceListener(on: device, address: Self.volumeAddress)
+        addDeviceListener(on: device, address: Self.muteAddress)
         onChange?()
     }
 
-    private func addListener(on device: AudioObjectID, address: AudioObjectPropertyAddress) {
-        var mutableAddress = address
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            Task { @MainActor in self?.onChange?() }
+    private func addDeviceListener(on device: AudioObjectID, address: AudioObjectPropertyAddress) {
+        do {
+            deviceListeners.append(
+                try AudioPropertyListener(object: device, address: address) { [weak self] in
+                    Task { @MainActor in self?.onChange?() }
+                }
+            )
+        } catch {
+            logger.error(
+                "Could not observe the output device's volume: \(error.localizedDescription, privacy: .public)"
+            )
         }
-
-        let status = AudioObjectAddPropertyListenerBlock(device, &mutableAddress, queue, block)
-        guard status == noErr else {
-            logger.error("Could not observe volume property: \(status, privacy: .public)")
-            return
-        }
-        listeners.append((device, address, block))
     }
 
-    /// Observes a system-wide property.
+    /// Observes the two system-wide properties, once.
     ///
-    /// These fire for changes nothing else here would learn about, so they
-    /// re-read the device and the list rather than only reporting, and the
-    /// report then goes out through `onChange` at the end of `refresh()` like
-    /// every other one. Registering again from inside `refresh()` is safe:
-    /// `refresh()` removes every listener first, and these are recorded in the
-    /// same list as the rest, so they cannot stack up.
-    private func addSystemListener(address: AudioObjectPropertyAddress) {
-        var mutableAddress = address
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            Task { @MainActor in self?.refresh() }
+    /// They fire for changes nothing else here would learn about, a device
+    /// arriving, leaving, or becoming the default when the engine's own state
+    /// has not changed and it therefore reports nothing. So they re-read the
+    /// device and the list rather than only reporting, and the report then goes
+    /// out through `onChange` at the end of `refresh()` like every other one.
+    ///
+    /// Registered here, for the life of the object, rather than from inside
+    /// `refresh()`, which is the very thing they call. Re-registering a
+    /// listener from inside its own callback is how waking from sleep locked
+    /// the app up: `AudioObjectRemovePropertyListenerBlock` reported success
+    /// and removed nothing, so each pass left its listeners behind, one device
+    /// notification then ran `refresh()` once per listener that had piled up,
+    /// and each of those runs piled up more. The system object does not change,
+    /// so there was never a reason to re-register for it.
+    private func startSystemListeners() {
+        for address in [Self.defaultOutputDeviceAddress, Self.devicesAddress] {
+            do {
+                systemListeners.append(
+                    try AudioPropertyListener(object: .system, address: address) { [weak self] in
+                        Task { @MainActor in self?.refresh() }
+                    }
+                )
+            } catch {
+                logger.error(
+                    "Could not observe a system audio property: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
-
-        let status = AudioObjectAddPropertyListenerBlock(
-            AudioObjectID.system, &mutableAddress, queue, block
-        )
-        guard status == noErr else {
-            logger.error("Could not observe system audio property: \(status, privacy: .public)")
-            return
-        }
-        listeners.append((AudioObjectID.system, address, block))
-    }
-
-    private func removeListeners() {
-        for (device, address, block) in listeners {
-            var mutableAddress = address
-            AudioObjectRemovePropertyListenerBlock(device, &mutableAddress, queue, block)
-        }
-        listeners.removeAll()
     }
 
     private static let volumeAddress = AudioObjectPropertyAddress(
