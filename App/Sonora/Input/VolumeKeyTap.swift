@@ -59,11 +59,12 @@ final class VolumeKeyTap {
         // measured; `CGEventType.systemDefined` does not compile.
         let mask = CGEventMask(1 << 14)
 
-        // The callback cannot capture main-actor state, so it carries an
-        // unmanaged pointer to self and hops back to the main actor with the
-        // decoded key. Decoding and that hop are all that runs on the tap's
-        // own thread, which is what keeps the tap quick enough for the system
-        // to leave it enabled.
+        // The callback is a function at file scope, never a closure written
+        // here. See `volumeKeyTapCallback`. It receives an unmanaged pointer
+        // to self and hops to the main actor with the decoded key, so
+        // decoding and that hop are all that runs on the tap's own thread,
+        // which is what keeps the tap quick enough for the system to leave it
+        // enabled.
         let context = Unmanaged.passUnretained(self).toOpaque()
 
         guard let tap = CGEvent.tapCreate(
@@ -71,56 +72,7 @@ final class VolumeKeyTap {
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: mask,
-            callback: { _, type, event, userInfo in
-                // The system disables a tap that takes too long or when input
-                // is interrupted. Re-enabling is the documented recovery.
-                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    if let userInfo {
-                        let tap = Unmanaged<VolumeKeyTap>.fromOpaque(userInfo)
-                            .takeUnretainedValue()
-                        Task { @MainActor in tap.reEnable() }
-                    }
-                    return Unmanaged.passUnretained(event)
-                }
-
-                guard let nsEvent = NSEvent(cgEvent: event),
-                      nsEvent.subtype.rawValue == 8,
-                      let userInfo else {
-                    return Unmanaged.passUnretained(event)
-                }
-
-                let keyCode = Int32((nsEvent.data1 & 0xFFFF_0000) >> 16)
-                let isPressed = ((nsEvent.data1 & 0x0000_FF00) >> 8) == 0x0A
-                let isRepeat = (nsEvent.data1 & 0x1) == 1
-
-                let key: Key?
-                switch keyCode {
-                case NX_KEYTYPE_SOUND_UP: key = .up
-                case NX_KEYTYPE_SOUND_DOWN: key = .down
-                case NX_KEYTYPE_MUTE: key = .mute
-                default: key = nil
-                }
-
-                guard let key else { return Unmanaged.passUnretained(event) }
-
-                // Repeats are wanted for up and down, so holding either one
-                // keeps stepping. Not for mute: each repeat would toggle the
-                // device back again and flicker the overlay. Whether the mute
-                // key produces repeats at all was never measured, and ignoring
-                // them is right either way. Swallowed rather than passed on,
-                // so the system's overlay does not appear for the repeat
-                // Sonora chose to ignore.
-                if isRepeat, key == .mute { return nil }
-
-                if isPressed {
-                    let owner = Unmanaged<VolumeKeyTap>.fromOpaque(userInfo)
-                        .takeUnretainedValue()
-                    Task { @MainActor in owner.onKey?(key) }
-                }
-
-                // Swallow it, so the system's own overlay stays out of the way.
-                return nil
-            },
+            callback: volumeKeyTapCallback,
             userInfo: context
         ) else {
             throw TapError.tapCreationFailed
@@ -168,7 +120,9 @@ final class VolumeKeyTap {
         isRunning = false
     }
 
-    private func reEnable() {
+    /// `fileprivate` rather than `private` so `volumeKeyTapCallback` can
+    /// reach it: a function at file scope is not inside this declaration.
+    fileprivate func reEnable() {
         guard let tap else { return }
         CGEvent.tapEnable(tap: tap, enable: true)
     }
@@ -184,6 +138,72 @@ final class VolumeKeyTap {
     isolated deinit {
         stop()
     }
+}
+
+/// The tap callback, at file scope and isolated to nothing.
+///
+/// It has to be. A closure written inside `start()` is formed in a main-actor
+/// context, and Swift treats such a closure as isolated to that actor and
+/// checks the isolation at entry when it is converted to a C function pointer.
+/// The tap's run loop is on a thread of its own, so that check failed on the
+/// very first key press and took the app down with `SIGTRAP`: measured in
+/// crash report `Sonora-2026-09-14-172813`, `_swift_task_checkIsolatedSwift`
+/// under `closure #1 in VolumeKeyTap.start()`.
+///
+/// Nothing in here touches main-actor state. Decoding needs only `NSEvent`'s
+/// initialiser and its data accessors, which carry no isolation, and the owner
+/// is reached inside a hop rather than on this thread.
+private func volumeKeyTapCallback(
+    _ proxy: CGEventTapProxy,
+    _ type: CGEventType,
+    _ event: CGEvent,
+    _ userInfo: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+    // The system disables a tap that takes too long or when input is
+    // interrupted. Re-enabling is the documented recovery.
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        if let userInfo {
+            let owner = Unmanaged<VolumeKeyTap>.fromOpaque(userInfo).takeUnretainedValue()
+            Task { @MainActor in owner.reEnable() }
+        }
+        return Unmanaged.passUnretained(event)
+    }
+
+    guard let nsEvent = NSEvent(cgEvent: event),
+          nsEvent.subtype.rawValue == 8,
+          let userInfo else {
+        return Unmanaged.passUnretained(event)
+    }
+
+    let keyCode = Int32((nsEvent.data1 & 0xFFFF_0000) >> 16)
+    let isPressed = ((nsEvent.data1 & 0x0000_FF00) >> 8) == 0x0A
+    let isRepeat = (nsEvent.data1 & 0x1) == 1
+
+    let key: VolumeKeyTap.Key?
+    switch keyCode {
+    case NX_KEYTYPE_SOUND_UP: key = .up
+    case NX_KEYTYPE_SOUND_DOWN: key = .down
+    case NX_KEYTYPE_MUTE: key = .mute
+    default: key = nil
+    }
+
+    guard let key else { return Unmanaged.passUnretained(event) }
+
+    // Repeats are wanted for up and down, so holding either one keeps
+    // stepping. Not for mute: each repeat would toggle the device back again
+    // and flicker the overlay. Whether the mute key produces repeats at all
+    // was never measured, and ignoring them is right either way. Swallowed
+    // rather than passed on, so the system's overlay does not appear for the
+    // repeat Sonora chose to ignore.
+    if isRepeat, key == .mute { return nil }
+
+    if isPressed {
+        let owner = Unmanaged<VolumeKeyTap>.fromOpaque(userInfo).takeUnretainedValue()
+        Task { @MainActor in owner.onKey?(key) }
+    }
+
+    // Swallow it, so the system's own overlay stays out of the way.
+    return nil
 }
 
 /// The thread the tap's run loop lives on.
