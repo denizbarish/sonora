@@ -131,3 +131,33 @@ Markers written into `settings.json` by hand, preamp 4.5 dB and 7.25 dB on the
 at 2. That covers the file. It does not cover loading: nothing writes unless
 something changes, so an app that fell back to defaults would leave the same
 file behind. The panel half is the hand check in the table.
+
+## Volume keys and the overlay
+
+Checked by hand 2026-09-14 against `0.1.1-keyfix` installed in
+`/Applications`, after the event tap callback was moved out of the main actor's
+isolation.
+
+| Check | Result |
+|---|---|
+| The app survives having the tap running | Pass, same process alive 15 minutes with the `com.sonora.volume-key-tap` thread present and no new crash report |
+| A volume key press is acted on | Pass |
+| The overlay appears for it | Pass |
+
+Before the fix the app died two seconds after every launch, without anyone
+touching a volume key: the tap's mask is the whole `NX_SYSDEFINED` class, so
+any event of that class entered the callback and the isolation check trapped
+before decoding. See `Tools/event-tap-isolation-spike`.
+
+Two things this cost, both worth remembering:
+
+The overlay was reported missing when the copy in `/Applications` was three
+builds old and had no overlay in it. Check what is installed before believing
+what it does.
+
+An ad hoc signed build gets a new code identity with every build, and TCC keys
+Accessibility to that identity. The old row stays in System Settings looking
+switched on while the system refuses the trust, so the app asks again and the
+user sees a contradiction. `tccutil reset Accessibility com.sonora.Sonora`
+clears it. A build signed with a developer identity would not have this
+problem, which is a distribution question, not a bug.
